@@ -30,11 +30,17 @@ The image tag in [runner/Dockerfile](runner/Dockerfile) **must** match the
 
 ## One-time VPS setup
 
-Deploy key authenticates as `root`, so `APP_DIR` is `/opt/automated-qa-system` —
-deliberately outside the web docroot, since Apache would otherwise serve `.env`.
+Actions connects as `root`. `APP_DIR` is
+`/home/admin/web/employee.netovation.eu/public_html/automated-qa-system`, the same
+convention MailCraft and leave-system use on this box.
+
+That is inside the web docroot, so the project ships its own `.htaccess` with
+`Require all denied`. It blocks reading `.env`, `.git` and source off disk, and
+does not affect the dashboard — `ProxyPass` claims `/automated-qa-system/` before
+Apache consults the filesystem. Don't remove it.
 
 ```bash
-cd /opt
+cd /home/admin/web/employee.netovation.eu/public_html
 git clone https://github.com/jayrdoria/automated-qa-system.git
 cd automated-qa-system
 
@@ -79,7 +85,7 @@ Both gates fail the deploy loudly rather than leaving cron to fail silently.
 ## Cron (only after a green deploy)
 
 ```
-*/20 * * * * /opt/automated-qa-system/scripts/run-checks.sh >> /opt/automated-qa-system/logs/cron.log 2>&1
+*/20 * * * * /home/admin/web/employee.netovation.eu/public_html/automated-qa-system/scripts/run-checks.sh >> /home/admin/web/employee.netovation.eu/public_html/automated-qa-system/logs/cron.log 2>&1
 ```
 
 ## Local development

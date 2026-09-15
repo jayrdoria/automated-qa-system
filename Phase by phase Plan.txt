@@ -107,8 +107,14 @@ Follows the Mailcraft pattern (see mailcraft/.github/workflows/deploy.yml):
   on Contabo every push is slow and thrashes the disk. Pulling a cached layer diff is not.
 - Required GitHub secrets: `VPS_HOST`, `VPS_USER`, `VPS_SSH_KEY`, `GHCR_TOKEN`
 - VPS_USER is `root` (confirmed — the github_actions key authenticates as root).
-  APP_DIR is /opt/automated-qa-system, deliberately OUTSIDE the web docroot:
-  Apache serves public_html, and .env must never be reachable over HTTP.
+  APP_DIR is public_html/automated-qa-system, matching the MailCraft and
+  leave-system convention on this box. It therefore sits INSIDE the web docroot,
+  so two things guard .env: the vhost-level FilesMatch deny rule, and a
+  `Require all denied` .htaccess inside the project directory itself. The
+  .htaccess is the durable one — the vhost rule lives in a VestaCP-generated
+  file that a vhost rebuild would silently drop. Direct file access being
+  denied does not affect the dashboard: ProxyPass claims /automated-qa-system/
+  before Apache ever consults the filesystem.
 - `.env` lives on the server only, referenced via `env_file: .env`
 - Three images built per push: web, web:migrate, runner.
 - Two deploy gates: /api/health (proves app + Postgres) and a runner smoke check

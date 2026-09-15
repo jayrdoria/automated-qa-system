@@ -82,9 +82,11 @@ jobs:
         uses: appleboy/ssh-action@v1
         env:
           GHCR_TOKEN: ${{ secrets.GHCR_TOKEN }}
-          # Deploy key authenticates as root. Kept out of the web docroot on
-          # purpose — Apache would happily serve .env from under public_html.
-          APP_DIR: /opt/automated-qa-system
+          # Same convention as MailCraft and leave-system on this box.
+          # Direct filesystem access to this dir is denied by its own .htaccess;
+          # the dashboard is reached via ProxyPass, which resolves before the
+          # filesystem, so the deny rule does not affect the running app.
+          APP_DIR: /home/admin/web/employee.netovation.eu/public_html/automated-qa-system
         with:
           host: ${{ secrets.VPS_HOST }}
           username: ${{ secrets.VPS_USER }}
