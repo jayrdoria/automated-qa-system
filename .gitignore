@@ -1,0 +1,32 @@
+# Dependencies
+node_modules/
+
+# Environment files — never commit these
+.env
+.env.local
+.env.*.local
+
+# Playwright / run artifacts (screenshots, traces, reports, logs, alert state)
+artifacts/
+test-results/
+playwright-report/
+blob-report/
+playwright/.cache/
+logs/
+
+# Build output
+.next/
+out/
+dist/
+*.tsbuildinfo
+next-env.d.ts
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Editor
+.vscode/
+.idea/
+*.swp
+*.swo

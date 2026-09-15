@@ -1,0 +1,75 @@
+services:
+  # Dashboard at employee.netovation.eu/automated-qa-system.
+  # Bound to loopback only — Apache reverse-proxies the subpath to it.
+  # Never publish 0.0.0.0 here; the app has no auth of its own.
+  web:
+    image: ghcr.io/jayrdoria/automated-qa-system-web:latest
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      DATABASE_URL: postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}
+    ports:
+      - "127.0.0.1:7071:7071"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  # One-shot `prisma migrate deploy`. Lives here rather than as a raw
+  # `docker run` in the workflow so compose builds DATABASE_URL from .env.
+  migrate:
+    image: ghcr.io/jayrdoria/automated-qa-system-web:migrate
+    profiles: ["tools"]
+    env_file: .env
+    environment:
+      DATABASE_URL: postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    env_file: .env
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  # Batch job, NOT a service. The `batch` profile keeps `up -d` from starting it;
+  # cron invokes it explicitly via scripts/run-checks.sh.
+  runner:
+    image: ghcr.io/jayrdoria/automated-qa-system-runner:latest
+    profiles: ["batch"]
+    env_file: .env
+    init: true
+    # Chromium crashes on the default 64MB /dev/shm. Playwright's documented fix.
+    ipc: host
+    environment:
+      # In-network call — does not traverse Apache, so results post even if the
+      # public vhost is down.
+      INGEST_URL: http://web:7071/automated-qa-system/api/results
+    volumes:
+      - ./artifacts:/app/artifacts
+    depends_on:
+      - web
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+volumes:
+  postgres_data:

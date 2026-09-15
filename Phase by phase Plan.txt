@@ -1,0 +1,143 @@
+## Automated QA Monitoring System — Stakes.com & X7 Casino
+Phase-by-phase development plan (rev 2 — amended after reviewing Mailcraft deploy + leave-management SMTP)
+
+**Goal:** replace manual daily checks (login, game load, provider list, chat widget, cashier modal) with an automated Playwright system running on one Contabo VPS, alerting to Slack via email, whitelisted on Cloudflare for both brands.
+
+**Not in scope for now:** Checkly/Datadog, ProtonVPN, multi-region servers (DE/FR/IT/ES).
+
+**Added to scope (rev 3):** a read-only web dashboard at
+employee.netovation.eu/automated-qa-system showing current status per brand/check
+plus recent run history. Public, no auth — see the Phase 5 note on what that means
+for screenshots.
+
+**Build order note:** Phase 6 (deploy) is built FIRST against a trivial smoke check, so the
+push -> GHCR -> VPS -> cron loop is proven before any real selector work begins. Debugging
+deploy plumbing and flaky casino selectors at the same time is what stalls these projects.
+
+---
+
+**Phase 0 — Discovery (confirmed)**
+- Checks: login, game load (Wanted Dead or a Wild) on both brands, provider list visible on `/casino`, chat widget icon (lower right), cashier modal opens via deposit button
+- Test credentials: one test account per brand. Values live ONLY in `.env` on the server —
+  never in this file, never in the repo. See `.env.example` for the key names.
+- Frequency: every 15-30 min, single server, no regional split
+- Server: one Contabo VPS only (`194.233.89.28`), confirmed static IP
+- Alerting: Gmail SMTP (app password) sending to the Slack channel email address
+- Cloudflare: ticket filed whitelisting `194.233.89.28` on both the Stakes.com and X7 Casino zones
+- Deploy: GitHub Actions auto-deploy, same GHCR pattern as Mailcraft
+
+**Phase 1 — Architecture**
+Three services, one repo:
+  /runner  — Playwright batch job. Cron-driven, exits after each run.
+  /web     — Next.js 15 dashboard, long-running, basePath /automated-qa-system,
+             bound to 127.0.0.1:7071. Owns Prisma and all DB access.
+  postgres — dedicated instance, NOT shared with Mailcraft's, so a migration here
+             can never affect Mailcraft.
+
+- Runner does NOT talk to Postgres. It POSTs results to the web app's ingest API over
+  the docker network. Keeps Prisma out of the 2GB Playwright image and means one owner
+  for the schema.
+- Ingest route is bearer-token protected (INGEST_TOKEN). It sits under the public
+  basePath, so Apache exposes it — network isolation alone is not enough.
+- Runner base image is `mcr.microsoft.com/playwright:vX.Y.Z-noble`, NOT node:alpine —
+  alpine has no browser system dependencies. The image tag and the `@playwright/test`
+  version in package.json must be bumped together or the browsers will mismatch.
+- Runner is a BATCH JOB, not a service: no exposed port, no `restart:`, excluded from
+  `docker compose up -d` via the `batch` profile.
+- Tests live at /runner/tests/stakes/*.spec.ts and /runner/tests/x7/*.spec.ts.
+
+**Phase 2 — Core checks**
+- Login (success case, plus a bad-credentials case to confirm the site still correctly rejects)
+- Game load: "Wanted Dead or a Wild" renders and plays, both brands
+- Provider list visible/populated on `/casino`
+- Chat widget icon present and openable
+- Cashier modal opens via the deposit button
+- Each check captures a screenshot automatically on failure
+- Playwright `retries: 1` with `trace: 'on-first-retry'` — one immediate retry before a
+  failure counts. This is the single biggest false-positive reducer and it is nearly free.
+
+**Phase 3 — Scheduling**
+- Cron on the server triggering `docker compose run --rm` every 15-30 min
+- Overlap prevention is concrete, not aspirational: the cron line wraps the run in
+  `flock -n` on a lockfile. A hung game-load check otherwise stacks containers until
+  the VPS runs out of memory.
+- Runs are sequential within a single container invocation (workers: 1) so the two
+  brands don't hammer the same origin simultaneously.
+
+**Phase 4 — Alerting**
+- On failure: SMTP email via Gmail (app password) to the Slack channel address, including
+  check name, brand, error, and screenshot. Reuses the exact nodemailer config pattern from
+  leave-management-system: SMTP_HOST / SMTP_USER / SMTP_PASS, port 587, secure:false (STARTTLS).
+- Alert dedup / anti-flapping (REQUIRED, not optional): alert on the TRANSITION to failing,
+  send one "recovered" notice on the transition back, and re-notify only after N hours if
+  still down. Without this, a 2am breakage sends ~30 emails by morning and the channel
+  gets muted — which defeats the whole system.
+- Small JSON state file on disk tracks last-known status per check to drive the above.
+- Log all results (pass and fail) locally for history, not just failure noise
+- Monthly cleanup job to delete or archive logs/screenshots/traces older than 30 days,
+  so disk doesn't fill up over time
+
+  RISK to validate early (Phase 7): Slack's email-to-channel renders the body reliably but
+  attachment handling is inconsistent — the screenshot may land collapsed or be dropped.
+  Test this before building the notifier around it. Fallback is a Slack incoming webhook.
+
+**Phase 5 — Security**
+- All credentials (test accounts, SMTP) in `.env`, never hardcoded, never committed
+- `.gitignore` covering `.env` and `node_modules/` is a Phase 5 DELIVERABLE, committed
+  before the first push — not an afterthought. This repo also holds a GHCR token and an
+  SSH deploy key in GitHub Actions secrets, so a leaked `.env` is not a small problem.
+- `.env.example` committed for reference with all keys present and values empty
+- Rotate the test account passwords once live, since they were shared in chat earlier
+- The dashboard is PUBLIC and unauthenticated by explicit decision. Consequence:
+  failure screenshots are excluded from the web UI (PUBLIC_SHOW_SCREENSHOTS=false)
+  because they capture logged-in casino account state — balances, account IDs,
+  possibly PII. They still reach the Slack alert email, which is private.
+  Do not flip that flag without adding auth first.
+- INGEST_TOKEN is the ONLY thing stopping anyone from POSTing fake check results;
+  /api/results is publicly routable through Apache like every other path under
+  the basePath. Generate with `openssl rand -hex 32`.
+
+**Phase 6 — DevOps/Deployment (BUILT FIRST)**
+Follows the Mailcraft pattern (see mailcraft/.github/workflows/deploy.yml):
+1. GitHub Actions builds three images and pushes to GHCR with registry layer caching:
+   automated-qa-system-web:latest, :migrate, and automated-qa-system-runner:latest
+2. SSH into the VPS -> `docker login ghcr.io` -> `git pull` -> `docker pull`
+   -> start postgres -> `prisma migrate deploy` -> restart web -> gates -> prune
+- Build happens on Actions, NOT on the VPS. The Playwright image is ~2GB; building that
+  on Contabo every push is slow and thrashes the disk. Pulling a cached layer diff is not.
+- Required GitHub secrets: `VPS_HOST`, `VPS_USER`, `VPS_SSH_KEY`, `GHCR_TOKEN`
+- VPS_USER is `root` (confirmed — the github_actions key authenticates as root).
+  APP_DIR is /opt/automated-qa-system, deliberately OUTSIDE the web docroot:
+  Apache serves public_html, and .env must never be reachable over HTTP.
+- `.env` lives on the server only, referenced via `env_file: .env`
+- Three images built per push: web, web:migrate, runner.
+- Two deploy gates: /api/health (proves app + Postgres) and a runner smoke check
+  (proves Chromium launches). Either failing fails the deploy.
+- Watch disk: box was at 19% of 194G with 3.7G RAM free before this project.
+
+Server-side changes are ADDITIVE ONLY. Two files, both additions, nothing
+existing modified or removed:
+  1. employee.netovation.eu.httpd.ssl.conf — one ProxyPass pair below MailCraft's
+  2. public_html/.htaccess — one SetEnvIf line + one word in the rewrite exclusion
+Mailcraft, n8n, leave-system, department-repository and uptime-report-system are
+untouched. `docker image prune -f` removes dangling images only and cannot affect
+their running containers or volumes. Exact diffs: apache/automated-qa-system.conf
+
+**Phase 7 — Testing/Validation**
+- Manually run each spec against both brands first to confirm selectors are stable
+  (watch for dynamic class names, prefer `data-testid` or role-based selectors where available)
+- Validate the Slack email-to-channel attachment behaviour before finalising the notifier
+- Run in parallel with manual checks for a few days before trusting it fully
+
+**Phase 8 — Launch**
+- Confirm the Cloudflare ticket is approved and the IP is whitelisted on both brands before
+  relying on results (checks may get bot-challenged until then)
+- IP allowlist gets past the WAF but bot management can still fingerprint headless Chromium.
+  If checks are still challenged after whitelisting, the fix is a persistent browser context
+  and a realistic user agent — not another IP ticket.
+- Separately: logging into the same two accounts from one IP every 15 min may trip the
+  brands' OWN fraud/velocity rules. Flag this in the same Cloudflare ticket.
+- Enable the schedule
+- Watch the Slack channel for a few days to tune out false positives (flaky selectors,
+  slow loads) before treating alerts as real incidents
+- Multi-region (DE/FR/IT/ES) stays as a documented future phase, not built now

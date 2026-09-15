@@ -1,0 +1,42 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+/// One row per check execution. The runner POSTs these after every cron run.
+model CheckRun {
+  id         String   @id @default(cuid())
+  brand      String // "stakes" | "x7"
+  checkName  String   @map("check_name") // "login" | "game-load" | "providers" | ...
+  status     String // "pass" | "fail"
+  durationMs Int      @map("duration_ms")
+  error      String?
+  /// Path inside the artifacts volume. Never served publicly unless
+  /// PUBLIC_SHOW_SCREENSHOTS is enabled — these contain logged-in account state.
+  screenshot String?
+  startedAt  DateTime @map("started_at")
+  createdAt  DateTime @default(now()) @map("created_at")
+
+  @@index([brand, checkName, startedAt])
+  @@index([startedAt])
+  @@map("check_run")
+}
+
+/// Current known status per check, driving alert dedup so a broken check
+/// doesn't email the Slack channel every 20 minutes overnight.
+model CheckState {
+  id             String    @id @default(cuid())
+  brand          String
+  checkName      String    @map("check_name")
+  status         String
+  since          DateTime
+  lastNotifiedAt DateTime? @map("last_notified_at")
+  updatedAt      DateTime  @updatedAt @map("updated_at")
+
+  @@unique([brand, checkName])
+  @@map("check_state")
+}

@@ -1,0 +1,14 @@
+node_modules
+.env*
+!.env.example
+.git
+.gitignore
+.github
+artifacts
+test-results
+playwright-report
+blob-report
+logs
+*.md
+*.txt
+*.tsbuildinfo

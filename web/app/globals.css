@@ -1,0 +1,15 @@
+@import "tailwindcss";
+
+@theme {
+  --color-pass: oklch(0.72 0.17 152);
+  --color-fail: oklch(0.63 0.21 25);
+  --color-stale: oklch(0.72 0.15 85);
+}
+
+html {
+  color-scheme: light dark;
+}
+
+body {
+  @apply bg-white text-neutral-900 antialiased dark:bg-neutral-950 dark:text-neutral-100;
+}
