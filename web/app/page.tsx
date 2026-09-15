@@ -72,7 +72,9 @@ export default async function DashboardPage() {
     <main className="mx-auto max-w-6xl px-6 py-10">
       <header className="mb-8 flex flex-wrap items-baseline justify-between gap-4">
         <div>
-          <h1 className="text-2xl font-semibold tracking-tight">QA Monitor</h1>
+          <h1 className="text-2xl font-semibold tracking-tight">
+            Automated QA Monitor
+          </h1>
           <p className="mt-1 text-sm text-neutral-500 dark:text-neutral-400">
             Stakes.com &amp; X7 Casino · checks run every 20 minutes
           </p>
