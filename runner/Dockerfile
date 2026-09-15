@@ -20,8 +20,9 @@ COPY --from=deps --chown=pwuser:pwuser /app/node_modules ./node_modules
 COPY --chown=pwuser:pwuser playwright.config.ts ./
 COPY --chown=pwuser:pwuser tests ./tests
 
-# pwuser (uid 1000) ships with the Playwright image. We drive a browser against
-# third-party sites, so don't run it as root.
+# pwuser (uid 1001) ships with the Playwright image. We drive a browser against
+# third-party sites, so don't run it as root. The host artifacts dir must be
+# owned by 1001 or the bind mount is unwritable — the deploy workflow chowns it.
 RUN mkdir -p /app/artifacts && chown pwuser:pwuser /app/artifacts /app
 USER pwuser
 

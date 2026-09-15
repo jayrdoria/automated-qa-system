@@ -50,7 +50,7 @@ openssl rand -hex 32        # paste as INGEST_TOKEN
 nano .env                   # set POSTGRES_PASSWORD + INGEST_TOKEN at minimum
 
 mkdir -p artifacts logs
-chown -R 1000:1000 artifacts
+chown -R 1001:1001 artifacts   # pwuser in the Playwright image
 chmod +x scripts/run-checks.sh
 ```
 

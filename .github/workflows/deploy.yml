@@ -106,6 +106,10 @@ jobs:
             docker pull ghcr.io/jayrdoria/automated-qa-system-runner:latest
 
             mkdir -p artifacts logs
+            # pwuser in the Playwright image is uid 1001. The bind mount is
+            # unwritable without this, and the runner fails with EACCES.
+            # Done every deploy so a fresh clone needs no manual chown.
+            chown -R 1001:1001 artifacts
 
             # Postgres must be up and healthy before migrations run.
             docker compose -f docker-compose.prod.yml up -d postgres
