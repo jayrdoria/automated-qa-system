@@ -1,0 +1,28 @@
+# Normalise line endings.
+#
+# Without this, a file authored on Windows can reach the Linux VPS with CRLF.
+# For shell scripts that is not cosmetic — the kernel reads `#!/usr/bin/env bash\r`
+# and fails with "bad interpreter: No such file or directory", which reads like
+# a missing binary rather than a line-ending problem.
+#
+# It also caused a deploy failure: a CRLF copy of a file made `git pull` see
+# every line as modified and refuse to merge.
+
+* text=auto
+
+# Always LF — these are consumed by Linux, regardless of authoring OS.
+*.sh          text eol=lf
+*.yml         text eol=lf
+*.yaml        text eol=lf
+Dockerfile    text eol=lf
+.env.example  text eol=lf
+*.ts          text eol=lf
+*.tsx         text eol=lf
+*.prisma      text eol=lf
+*.sql         text eol=lf
+
+# Binary — never touch.
+*.png binary
+*.jpg binary
+*.ico binary
+*.zip binary
