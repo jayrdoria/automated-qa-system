@@ -34,7 +34,10 @@ services:
       # so a manual `docker compose run` without the wrapper still works.
       SERVER_COUNTRIES: ${SERVER_COUNTRIES:-France}
       HEALTH_VPN_DURATION_INITIAL: 30s
-    restart: unless-stopped
+    # NOT `unless-stopped`: this tunnel is scoped to a single batch run.
+    # A persistent container would keep its original SERVER_COUNTRIES, so every
+    # region after the first would exit through the wrong country.
+    restart: "no"
 
   runner:
     network_mode: "service:gluetun"
