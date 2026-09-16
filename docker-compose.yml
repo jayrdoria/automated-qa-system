@@ -1,0 +1,25 @@
+# LOCAL DEVELOPMENT ONLY. Production uses docker-compose.prod.yml.
+#
+# Runs just Postgres — the web app runs on the host via `npm run dev` so you get
+# hot reload, and the runner runs via `npx playwright test` against real browsers.
+#
+#   docker compose up -d
+#
+# Port 5433 on purpose: avoids clashing with a local Postgres on 5432.
+services:
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    env_file: .env
+    ports:
+      - "127.0.0.1:5433:5432"
+    volumes:
+      - postgres_dev_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+volumes:
+  postgres_dev_data:

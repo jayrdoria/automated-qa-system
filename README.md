@@ -90,10 +90,29 @@ Both gates fail the deploy loudly rather than leaving cron to fail silently.
 
 ## Local development
 
+Requires Docker Desktop running.
+
 ```bash
-cd web && npm install && npm run dev        # dashboard
-cd runner && npm install && npm run check:smoke
+npm run setup     # once: postgres + deps + migrations + chromium
+npm run dev       # start postgres + dashboard
 ```
+
+Open **http://localhost:3000/automated-qa-system** — the `basePath` means plain
+`localhost:3000` returns 404.
+
+| Command | Does |
+|---|---|
+| `npm run dev` | Postgres + Next dev server |
+| `npm run check` | Run all checks |
+| `npm run check:ui` | Playwright time-travel debugger — best for selector work |
+| `npm run check:headed` | Watch the browser run |
+| `npm run migrate` | Apply migrations |
+| `npm run db:stop` | Stop Postgres |
+| `npm run typecheck` | Typecheck both packages |
+
+Local Postgres is on **5433**, not 5432, to avoid clashing with an existing
+local install. Config lives in the gitignored `.env` and `web/.env.local`
+(templates: `.env.example`, `web/.env.local.example`).
 
 ## Watch out for
 

@@ -1,0 +1,18 @@
+{
+  "name": "automated-qa-system",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Convenience scripts. Real deps live in web/ and runner/.",
+  "scripts": {
+    "setup": "docker compose up -d && npm --prefix web install && npm --prefix runner install && npm --prefix web exec -- prisma migrate deploy --schema web/prisma/schema.prisma && npm --prefix runner exec -- playwright install chromium",
+    "dev": "docker compose up -d && npm --prefix web run dev",
+    "db": "docker compose up -d",
+    "db:stop": "docker compose down",
+    "migrate": "npm --prefix web exec -- prisma migrate deploy --schema web/prisma/schema.prisma",
+    "check": "npm --prefix runner run check",
+    "check:smoke": "npm --prefix runner run check:smoke",
+    "check:ui": "npm --prefix runner exec -- playwright test --ui",
+    "check:headed": "npm --prefix runner exec -- playwright test --headed",
+    "typecheck": "npm --prefix web run typecheck && npm --prefix runner run typecheck"
+  }
+}
