@@ -17,8 +17,12 @@ FROM base AS runner
 # --chown on COPY, not a later `chown -R` — recursive chown over node_modules
 # would duplicate the entire tree into a new layer.
 COPY --from=deps --chown=pwuser:pwuser /app/node_modules ./node_modules
-COPY --chown=pwuser:pwuser playwright.config.ts ./
+COPY --chown=pwuser:pwuser playwright.config.ts tsconfig.json ./
 COPY --chown=pwuser:pwuser tests ./tests
+# lib/ and reporter/ are imported by the specs and the config — without these
+# the image builds fine and then every check fails on a missing module.
+COPY --chown=pwuser:pwuser lib ./lib
+COPY --chown=pwuser:pwuser reporter ./reporter
 
 # pwuser (uid 1001) ships with the Playwright image. We drive a browser against
 # third-party sites, so don't run it as root. The host artifacts dir must be

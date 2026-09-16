@@ -14,11 +14,15 @@
     "resolveJsonModule": true,
     "skipLibCheck": true,
     "forceConsistentCasingInFileNames": true,
-    "noEmit": true,
-    "baseUrl": ".",
-    "paths": {
-      "@lib/*": ["lib/*"]
-    }
+    "noEmit": true
   },
-  "include": ["tests/**/*.ts", "lib/**/*.ts", "playwright.config.ts"]
+  // No `paths` mapping on purpose. Playwright's built-in transpiler does not
+  // resolve tsconfig path aliases, so an alias would typecheck here and then
+  // fail at runtime inside the container. Specs use relative imports.
+  "include": [
+    "tests/**/*.ts",
+    "lib/**/*.ts",
+    "reporter/**/*.ts",
+    "playwright.config.ts"
+  ]
 }

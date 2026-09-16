@@ -3,17 +3,21 @@ import { timingSafeEqual } from "node:crypto";
 import { z } from "zod";
 import { prisma } from "@/lib/prisma";
 import { getEnv } from "@/lib/env";
+import { processResults } from "@/lib/alerting";
 
 export const dynamic = "force-dynamic";
 
 const resultSchema = z.object({
   brand: z.enum(["stakes", "x7"]),
+  region: z.string().regex(/^[A-Z]{2}$/).default("FR"),
   checkName: z.string().min(1).max(64),
   status: z.enum(["pass", "fail"]),
   durationMs: z.number().int().nonnegative(),
   error: z.string().max(4000).nullable().optional(),
   screenshot: z.string().max(512).nullable().optional(),
   startedAt: z.string().datetime(),
+  /// Set when the request never reached the brand (CDN edge block / geo).
+  blocked: z.boolean().optional(),
 });
 
 const payloadSchema = z.object({
@@ -55,6 +59,7 @@ export async function POST(request: Request) {
     await prisma.checkRun.createMany({
       data: results.map((r) => ({
         brand: r.brand,
+        region: r.region,
         checkName: r.checkName,
         status: r.status,
         durationMs: r.durationMs,
@@ -63,6 +68,14 @@ export async function POST(request: Request) {
         startedAt: new Date(r.startedAt),
       })),
     });
+
+    // Alerting must never make the runner think ingestion failed — the results
+    // are already durable at this point.
+    try {
+      await processResults(results);
+    } catch (alertError) {
+      console.error("Alerting failed after successful ingest:", alertError);
+    }
 
     return NextResponse.json({ ok: true, inserted: results.length }, { status: 201 });
   } catch (error) {

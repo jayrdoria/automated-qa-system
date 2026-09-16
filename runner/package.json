@@ -4,9 +4,13 @@
   "private": true,
   "description": "Automated Playwright QA monitoring for Stakes.com and X7 Casino",
   "scripts": {
-    "check": "playwright test",
+    "check": "playwright test tests/checks",
     "check:smoke": "playwright test tests/smoke.spec.ts",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "check:all": "playwright test",
+    "check:ui": "playwright test --ui",
+    "check:headed": "playwright test --headed",
+    "recon": "playwright test --headed --retries=0"
   },
   "dependencies": {
     "@playwright/test": "1.63.0",

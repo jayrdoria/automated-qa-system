@@ -1,4 +1,13 @@
 import { defineConfig, devices } from "@playwright/test";
+import path from "node:path";
+
+// Local dev reads the repo-root .env. In Docker there is no such file — compose
+// injects the real values via env_file — so a miss here is expected, not an error.
+try {
+  process.loadEnvFile(path.resolve(__dirname, "../.env"));
+} catch {
+  // running in the container, or no .env yet
+}
 
 /**
  * Batch monitoring config — this is not a CI suite, it's a cron-driven prober.
@@ -24,6 +33,9 @@ export default defineConfig({
     ["list"],
     ["json", { outputFile: "./artifacts/report.json" }],
     ["html", { outputFolder: "./artifacts/html-report", open: "never" }],
+    // Ships results to the dashboard and drives alerting. Last so it sees
+    // every result; failures inside it never fail the run.
+    ["./reporter/qa-reporter.ts"],
   ],
 
   use: {
@@ -38,7 +50,15 @@ export default defineConfig({
   projects: [
     {
       name: "chromium",
-      use: { ...devices["Desktop Chrome"] },
+      use: {
+        ...devices["Desktop Chrome"],
+        // devices["Desktop Chrome"] is 1280x720, which puts Stakes into its
+        // compact header: the Login button collapses behind an icon and is
+        // present in the DOM but not visible. Checks then fail on a hidden
+        // element, which reads as "login broken" rather than "wrong viewport".
+        // Matches a normal desktop browser.
+        viewport: { width: 1920, height: 1080 },
+      },
     },
   ],
 });

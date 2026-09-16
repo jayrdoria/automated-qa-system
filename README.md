@@ -3,10 +3,16 @@
 Playwright-based uptime/behaviour monitoring for **Stakes.com** and **X7 Casino**,
 with a dashboard at **https://employee.netovation.eu/automated-qa-system**.
 
-See `Phase by phase Plan.txt` for the full build plan. Current state: **Phase 6
-(auto-deploy) + dashboard shell**. The real brand checks (Phase 2) and the SMTP
-alerting (Phase 4) are not written yet — the dashboard renders "no data" until
-the runner posts its first results.
+See `Phase by phase Plan.txt` for the plan and **[RUNBOOK.md](RUNBOOK.md)** for
+validation and launch steps.
+
+**All phases are built. One blocker remains.**
+
+> ⛔ **The VPS cannot reach either brand.** `194.233.89.28` is in Singapore;
+> Stakes and X7 serve FR/DE/IT/ES and return HTTP 403. This is geo-blocking, not
+> bot detection — plain `curl` from the VPS is blocked too. Until the Cloudflare
+> whitelist covers the **geo rule** (or the VPN override is enabled), every check
+> reports `EDGE_BLOCKED`. See RUNBOOK Gate 0.
 
 ## Architecture
 
@@ -103,7 +109,7 @@ Open **http://localhost:3000/automated-qa-system** — the `basePath` means plai
 | Command | Does |
 |---|---|
 | `npm run dev` | Postgres + Next dev server |
-| `npm run check` | Run all checks |
+| `npm run check` | Run the 14 monitored checks |
 | `npm run check:ui` | Playwright time-travel debugger — best for selector work |
 | `npm run check:headed` | Watch the browser run |
 | `npm run migrate` | Apply migrations |

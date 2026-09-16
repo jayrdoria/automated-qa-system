@@ -11,6 +11,8 @@ datasource db {
 model CheckRun {
   id         String   @id @default(cuid())
   brand      String // "stakes" | "x7"
+  /// Market this run represents (FR/DE/IT/ES) — decided by the VPN exit node.
+  region     String   @default("FR")
   checkName  String   @map("check_name") // "login" | "game-load" | "providers" | ...
   status     String // "pass" | "fail"
   durationMs Int      @map("duration_ms")
@@ -21,7 +23,7 @@ model CheckRun {
   startedAt  DateTime @map("started_at")
   createdAt  DateTime @default(now()) @map("created_at")
 
-  @@index([brand, checkName, startedAt])
+  @@index([brand, region, checkName, startedAt])
   @@index([startedAt])
   @@map("check_run")
 }
@@ -31,12 +33,13 @@ model CheckRun {
 model CheckState {
   id             String    @id @default(cuid())
   brand          String
+  region         String    @default("FR")
   checkName      String    @map("check_name")
   status         String
   since          DateTime
   lastNotifiedAt DateTime? @map("last_notified_at")
   updatedAt      DateTime  @updatedAt @map("updated_at")
 
-  @@unique([brand, checkName])
+  @@unique([brand, region, checkName])
   @@map("check_state")
 }

@@ -1,0 +1,52 @@
+# OPT-IN VPN OVERRIDE — routes ONLY the check runner through a French exit node.
+#
+# Why this exists: the VPS is in Singapore. Stakes and X7 serve FR/DE/IT/ES and
+# geo-block everything else, so the server gets a hard 403. If the Cloudflare
+# whitelist doesn't cover the geo rule, this is the fallback that makes checks
+# work at all.
+#
+# Usage (note BOTH -f flags, order matters):
+#   docker compose -f docker-compose.prod.yml -f docker-compose.vpn.yml \
+#     --profile batch run --rm runner
+#
+# SAFETY: only the runner container's network namespace is affected. The host,
+# SSH, Apache, MailCraft, leave-system and n8n are untouched — nothing here
+# changes host routing. Never run a VPN client directly on the host; it would
+# black-hole SSH and take every site down.
+services:
+  gluetun:
+    image: qmcgaw/gluetun:latest
+    cap_add:
+      - NET_ADMIN
+    devices:
+      - /dev/net/tun:/dev/net/tun
+    env_file: .env
+    environment:
+      # Native ProtonVPN support — gluetun ships the server list, so no .ovpn
+      # file is needed. SERVER_COUNTRIES picks the exit region.
+      VPN_SERVICE_PROVIDER: protonvpn
+      VPN_TYPE: openvpn
+      # ProtonVPN OpenVPN credentials — NOT your Proton account login.
+      # Get them from account.protonvpn.com → Account → OpenVPN/IKEv2 username.
+      OPENVPN_USER: ${PROTON_OPENVPN_USER}
+      OPENVPN_PASSWORD: ${PROTON_OPENVPN_PASS}
+      # Set per-run by scripts/run-checks.sh (FR/DE/IT/ES). Defaults to France
+      # so a manual `docker compose run` without the wrapper still works.
+      SERVER_COUNTRIES: ${SERVER_COUNTRIES:-France}
+      HEALTH_VPN_DURATION_INITIAL: 30s
+    restart: unless-stopped
+
+  runner:
+    network_mode: "service:gluetun"
+    depends_on:
+      gluetun:
+        condition: service_healthy
+    environment:
+      # Sharing gluetun's namespace means docker DNS for `web` is not reliably
+      # reachable, so post results over the public URL instead of in-network.
+      INGEST_URL: https://employee.netovation.eu/automated-qa-system/api/results
+      # Which market this run represents — tags every result row.
+      CHECK_REGION: ${CHECK_REGION:-FR}
+      # X7 stays off until its Cloudflare challenge is lifted; its checks are
+      # skipped rather than posted as permanent failures.
+      X7_ENABLED: ${X7_ENABLED:-false}

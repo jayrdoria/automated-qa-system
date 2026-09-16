@@ -12,6 +12,19 @@ const schema = z.object({
     .enum(["true", "false"])
     .default("false")
     .transform((v) => v === "true"),
+
+  // Alerting. Optional so the system records results before SMTP is set up —
+  // an unconfigured notifier logs and drops rather than throwing.
+  SMTP_HOST: z.string().optional(),
+  SMTP_USER: z.string().optional(),
+  SMTP_PASS: z.string().optional(),
+  ALERT_TO: z.string().optional(),
+  // Empty string in .env would coerce to 0 and fail .positive(), taking the
+  // whole ingest route down. Treat blank as "unset".
+  ALERT_RENOTIFY_HOURS: z.preprocess(
+    (v) => (typeof v === "string" && v.trim() === "" ? undefined : v),
+    z.coerce.number().positive().default(4),
+  ),
 });
 
 type Env = z.infer<typeof schema>;

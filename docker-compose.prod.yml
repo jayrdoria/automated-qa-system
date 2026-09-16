@@ -10,6 +10,9 @@ services:
       DATABASE_URL: postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}
     ports:
       - "127.0.0.1:7071:7071"
+    volumes:
+      # Read-only: web only reads failure screenshots to attach to alert emails.
+      - ./artifacts:/app/artifacts:ro
     depends_on:
       postgres:
         condition: service_healthy
