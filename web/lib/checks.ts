@@ -29,11 +29,25 @@ export type CheckId = (typeof CHECKS)[number]["id"];
  * says nothing about DE.
  */
 export const REGIONS = [
-  { id: "FR", label: "France" },
-  { id: "DE", label: "Germany" },
-  { id: "IT", label: "Italy" },
-  { id: "ES", label: "Spain" },
+  { id: "FR", label: "France", cronOffset: 0 },
+  { id: "DE", label: "Germany", cronOffset: 5 },
+  { id: "IT", label: "Italy", cronOffset: 10 },
+  { id: "ES", label: "Spain", cronOffset: 15 },
 ] as const;
+
+/**
+ * Must match scripts/install-cron.sh. Regions are staggered 5 minutes apart so
+ * four VPN tunnels never come up at once on a box that also runs MailCraft and
+ * n8n; each region still runs every RUN_INTERVAL_MIN.
+ *
+ * cronOffset is minutes-past-the-hour, which is timezone-independent for any
+ * whole-hour offset — so the browser can compute the next run without knowing
+ * the server's timezone.
+ */
+export const RUN_INTERVAL_MIN = 20;
+
+/// How long a run may take before we stop calling it "running" and call it late.
+export const RUN_GRACE_MIN = 6;
 
 export type RegionId = (typeof REGIONS)[number]["id"];
 

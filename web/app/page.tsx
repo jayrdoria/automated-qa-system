@@ -1,5 +1,7 @@
 import { prisma } from "@/lib/prisma";
 import { BRANDS, BRAND_LABELS, CHECKS, REGIONS, DEFERRED_BRANDS } from "@/lib/checks";
+import { RunStatus } from "./RunStatus";
+import { RUN_INTERVAL_MIN } from "@/lib/checks";
 
 // Cron writes new rows every 20 min — never cache this.
 export const dynamic = "force-dynamic";
@@ -155,6 +157,17 @@ export default async function DashboardPage({
     ]),
   );
 
+  // Most recent result per region — feeds the live schedule indicator so it can
+  // tell "a tick passed and nothing arrived" (running, or late) from "we have
+  // fresh data" (idle, counting down).
+  const lastRunByRegion = new Map<string, string>();
+  for (const r of latestRuns) {
+    const prev = lastRunByRegion.get(r.region);
+    if (!prev || new Date(prev) < r.started_at) {
+      lastRunByRegion.set(r.region, r.started_at.toISOString());
+    }
+  }
+
   // ALL four markets are always rendered, including ones with no data yet.
   // Hiding empty regions would make "we never ran DE" look identical to "DE
   // isn't monitored" — the operator needs to see the full coverage grid and
@@ -194,7 +207,7 @@ export default async function DashboardPage({
           </h1>
           <p className="mt-1 text-sm text-neutral-500 dark:text-neutral-400">
             Stakes.com &amp; X7 Casino · {shownRegions.map((r) => r.id).join(" · ")}{" "}
-            · every 20 minutes
+            · each market checked every {RUN_INTERVAL_MIN} minutes
           </p>
         </div>
         <span
@@ -255,7 +268,15 @@ export default async function DashboardPage({
                         className="px-3 py-2 text-center font-medium"
                         title={r.label}
                       >
-                        {r.id}
+                        <div className="flex flex-col items-center leading-tight">
+                          <span>{r.id}</span>
+                          {!deferred && (
+                            <RunStatus
+                              cronOffset={r.cronOffset}
+                              lastRunIso={lastRunByRegion.get(r.id) ?? null}
+                            />
+                          )}
+                        </div>
                       </th>
                     ))}
                   </tr>
