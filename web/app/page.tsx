@@ -450,6 +450,7 @@ export default async function DashboardPage({
                               if (!live) {
                                 return (
                                   <RunStatus
+                                    cronOffset={r.cronOffset}
                                     lastFinishedIso={
                                       lastFinishedByRegion.get(r.id) ?? null
                                     }

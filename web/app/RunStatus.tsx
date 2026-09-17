@@ -10,9 +10,11 @@ import { RUN_INTERVAL_MIN, CRON_TICK_MIN } from "@/lib/checks";
  * instead, driven by real reported data rather than inferred from a clock.
  */
 export function RunStatus({
+  cronOffset,
   lastFinishedIso,
   lastRunIso,
 }: {
+  cronOffset: number;
   lastFinishedIso: string | null;
   lastRunIso: string | null;
 }) {
@@ -61,10 +63,22 @@ export function RunStatus({
    */
   const dueAt = finished + RUN_INTERVAL_MIN * 60_000;
 
-  // It then waits for the next cron tick after becoming due.
-  const tickMs = CRON_TICK_MIN * 60_000;
-  const nextAt = Math.ceil(dueAt / tickMs) * tickMs;
-  const secsToNext = Math.round((nextAt - now) / 1000);
+  /*
+   * Becoming due is not the same as running. The region then waits for the next
+   * cron tick IN ITS OWN SEQUENCE — FR fires at :00,:05,…, IT at :02,:07,…
+   *
+   * Rounding to a generic 5-minute boundary (the previous approach) ignored the
+   * per-region offset and was wrong by up to 4 minutes, which is exactly the
+   * "next 2 mins" that then started immediately.
+   */
+  const offset = ((cronOffset % CRON_TICK_MIN) + CRON_TICK_MIN) % CRON_TICK_MIN;
+  const tick = new Date(dueAt);
+  tick.setSeconds(0, 0);
+  // At most CRON_TICK_MIN iterations.
+  while (tick.getTime() < dueAt || tick.getMinutes() % CRON_TICK_MIN !== offset) {
+    tick.setTime(tick.getTime() + 60_000);
+  }
+  const secsToNext = Math.round((tick.getTime() - now) / 1000);
 
   if (secsToNext <= 0) {
     return (
@@ -76,9 +90,18 @@ export function RunStatus({
 
   const m = Math.floor(secsToNext / 60);
   const sec = secsToNext % 60;
+  /*
+   * "~" because this is the EARLIEST opportunity, not a guarantee. Only one
+   * region runs at a time (global lock), so a region whose tick arrives while
+   * another is mid-run waits for its next one. Presenting that as an exact
+   * countdown would be precise and wrong.
+   */
   return (
-    <span className="text-[11px] tabular-nums text-neutral-400 dark:text-neutral-500">
-      next {m}:{String(sec).padStart(2, "0")}
+    <span
+      className="text-[11px] tabular-nums text-neutral-400 dark:text-neutral-500"
+      title={`Earliest next run ${tick.toLocaleTimeString()} — may slip if another region is still running`}
+    >
+      ~{m}:{String(sec).padStart(2, "0")}
     </span>
   );
 }

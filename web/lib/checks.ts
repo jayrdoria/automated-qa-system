@@ -28,11 +28,19 @@ export type CheckId = (typeof CHECKS)[number]["id"];
  * node in that country — the sites localise and gate by IP, so "passing in FR"
  * says nothing about DE.
  */
+/**
+ * cronOffset is the minute-past-each-5-minute-tick that this region is eligible
+ * to start, and MUST match scripts/install-cron.sh:
+ *   FR 0,5,10,...   DE 1,6,11,...   IT 2,7,12,...   ES 3,8,13,...
+ *
+ * The UI computes "next run" from these. If they drift from the crontab the
+ * countdown silently lies — it will look plausible and be wrong by minutes.
+ */
 export const REGIONS = [
   { id: "FR", label: "France", cronOffset: 0 },
-  { id: "DE", label: "Germany", cronOffset: 5 },
-  { id: "IT", label: "Italy", cronOffset: 10 },
-  { id: "ES", label: "Spain", cronOffset: 15 },
+  { id: "DE", label: "Germany", cronOffset: 1 },
+  { id: "IT", label: "Italy", cronOffset: 2 },
+  { id: "ES", label: "Spain", cronOffset: 3 },
 ] as const;
 
 /**
