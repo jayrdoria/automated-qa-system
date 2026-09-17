@@ -19,6 +19,20 @@ try {
  */
 export default defineConfig({
   testDir: "./tests",
+  /*
+   * Spec files carry numeric prefixes because Playwright orders files
+   * alphabetically and there is no ordering API. The order is deliberate and
+   * matches the dashboard rows:
+   *
+   *   1 site-up  -> the canary. If the site is down this fails FIRST, so the
+   *                 five failures behind it are read as consequences rather
+   *                 than five separate incidents discovered one by one.
+   *   2 login    -> everything below needs a session
+   *   3..6       -> features, cheapest first
+   *
+   * Renaming a spec without keeping its prefix will silently reshuffle the run
+   * order and the dashboard will look like it is filling in at random.
+   */
   outputDir: "./artifacts/test-results",
 
   fullyParallel: false,

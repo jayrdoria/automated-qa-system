@@ -1,24 +1,19 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { RUN_INTERVAL_MIN, RUN_GRACE_MIN } from "@/lib/checks";
+import { RUN_INTERVAL_MIN, CRON_TICK_MIN } from "@/lib/checks";
 
 /**
- * Live per-region schedule indicator.
+ * Countdown to a region's next run.
  *
- * Derived from the cron offsets rather than reported by the runner: adding a
- * "run started" ping would mean a new endpoint, a new table and a write on
- * every tick, to display something the schedule already tells us.
- *
- * Trade-off worth knowing: this infers "running" from the clock, so a run that
- * dies instantly still shows as running until the grace period lapses. That is
- * why it flips to "late" rather than staying optimistic.
+ * Shown only when no run is in flight — a live run renders the progress bar
+ * instead, driven by real reported data rather than inferred from a clock.
  */
 export function RunStatus({
-  cronOffset,
+  lastFinishedIso,
   lastRunIso,
 }: {
-  cronOffset: number;
+  lastFinishedIso: string | null;
   lastRunIso: string | null;
 }) {
   // null until mounted: computing this during SSR would render a countdown
@@ -35,49 +30,55 @@ export function RunStatus({
     return <span className="text-[11px] text-neutral-400">&nbsp;</span>;
   }
 
-  const d = new Date(now);
-  const mins = d.getMinutes();
-
-  // Minutes until the next tick for this region.
-  const sinceLastTick =
-    (((mins - cronOffset) % RUN_INTERVAL_MIN) + RUN_INTERVAL_MIN) %
-    RUN_INTERVAL_MIN;
-  const minsToNext = RUN_INTERVAL_MIN - sinceLastTick;
-  const secsToNext = minsToNext * 60 - d.getSeconds();
-
-  // When did the most recent scheduled tick happen?
-  const lastTick = new Date(d);
-  lastTick.setMinutes(mins - sinceLastTick, 0, 0);
-
   const lastRun = lastRunIso ? new Date(lastRunIso).getTime() : 0;
-  const tickPassedWithoutResult = lastRun < lastTick.getTime();
-  const sinceTickMin = (now - lastTick.getTime()) / 60000;
 
-  if (tickPassedWithoutResult && sinceTickMin <= RUN_GRACE_MIN) {
+  /*
+   * Only claim a schedule exists when this region has actually reported
+   * recently. Otherwise a machine with no cron at all — every local dev
+   * environment — displays a confident countdown for a schedule that does not
+   * exist.
+   */
+  const scheduleLooksActive =
+    lastRun > 0 && now - lastRun < RUN_INTERVAL_MIN * 3 * 60_000;
+
+  if (!scheduleLooksActive) {
     return (
-      <span className="inline-flex items-center gap-1 text-[11px] font-medium text-sky-600 dark:text-sky-400">
-        <span className="relative flex h-1.5 w-1.5">
-          <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-sky-400 opacity-75" />
-          <span className="relative inline-flex h-1.5 w-1.5 rounded-full bg-sky-500" />
-        </span>
-        running
+      <span className="text-[11px] text-neutral-400 dark:text-neutral-600">
+        {lastRun > 0 ? "not scheduled" : "no data"}
       </span>
     );
   }
 
-  if (tickPassedWithoutResult) {
+  const finished = lastFinishedIso ? new Date(lastFinishedIso).getTime() : lastRun;
+
+  /*
+   * The interval runs from COMPLETION, not from a fixed clock — matching
+   * scripts/run-checks.sh, which exits early unless RUN_INTERVAL_MIN has
+   * elapsed since this region last finished.
+   *
+   * Computing against fixed :00/:20/:40 offsets (the old model) told you "next
+   * in 3 mins" seconds after a run ended, when the real answer was ~20.
+   */
+  const dueAt = finished + RUN_INTERVAL_MIN * 60_000;
+
+  // It then waits for the next cron tick after becoming due.
+  const tickMs = CRON_TICK_MIN * 60_000;
+  const nextAt = Math.ceil(dueAt / tickMs) * tickMs;
+  const secsToNext = Math.round((nextAt - now) / 1000);
+
+  if (secsToNext <= 0) {
     return (
       <span className="text-[11px] font-medium text-amber-600 dark:text-amber-400">
-        late {Math.floor(sinceTickMin)}m
+        due now
       </span>
     );
   }
 
   const m = Math.floor(secsToNext / 60);
-  const s = secsToNext % 60;
+  const sec = secsToNext % 60;
   return (
     <span className="text-[11px] tabular-nums text-neutral-400 dark:text-neutral-500">
-      next {m}:{String(s).padStart(2, "0")}
+      next {m}:{String(sec).padStart(2, "0")}
     </span>
   );
 }

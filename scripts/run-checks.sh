@@ -24,7 +24,23 @@ esac
 shift || true
 
 APP_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-LOCK_FILE="/tmp/automated-qa-system-${REGION}.lock"
+
+# ── Scheduling model ──────────────────────────────────────────────────────
+# Cron ticks every 5 minutes; this script decides whether to actually run.
+#
+# The interval is measured from the previous run's COMPLETION, not from a fixed
+# clock. With fixed :00/:20/:40 ticks, a run that overran by even a minute made
+# the next tick collide with itself, flock skipped it, and that region silently
+# went 40 minutes between checks instead of 20.
+#
+# Two guards:
+#   MIN_INTERVAL — has enough time passed since this region last finished?
+#   GLOBAL lock  — only one region runs at a time, whatever the clock says.
+#                  Four concurrent VPN tunnels + browsers would spike RAM on a
+#                  box that also runs MailCraft, n8n and two Postgres instances.
+MIN_INTERVAL_MIN="${MIN_INTERVAL_MIN:-20}"
+STAMP="${APP_DIR}/logs/.last-complete-${REGION}"
+LOCK_FILE="/tmp/automated-qa-system.lock"          # global, not per-region
 COMPOSE="docker compose -f docker-compose.prod.yml -f docker-compose.vpn.yml"
 
 cd "$APP_DIR"
@@ -62,6 +78,10 @@ run() {
   # Always tear the tunnel down, pass or fail. Leaving it up pins the next
   # region to this country and holds a VPN session open for nothing.
   $COMPOSE rm -sf gluetun >/dev/null 2>&1 || true
+
+  # Stamp AFTER completion — this is what makes the interval measure from the
+  # end of a run rather than its start.
+  date +%s > "$STAMP"
   echo "=== $(date -Is) finished [${REGION}] rc=${rc} ==="
   return $rc
 }
@@ -70,9 +90,18 @@ run() {
 # `flock <file> bash -c ...` — that needs the function re-declared inside a
 # subshell and quoting breaks the moment an argument contains a space.
 # -n = give up immediately rather than queueing behind a stuck run.
+# Cheap check first: is this region even due? Done before taking the lock so a
+# not-due region never blocks one that is.
+if [ -f "$STAMP" ]; then
+  elapsed=$(( $(date +%s) - $(cat "$STAMP") ))
+  if [ "$elapsed" -lt $(( MIN_INTERVAL_MIN * 60 )) ]; then
+    exit 0   # silent: this fires every 5 min by design, logging it is noise
+  fi
+fi
+
 exec 9>"$LOCK_FILE"
 if ! flock -n 9; then
-  echo "$(date -Is) [${REGION}] previous run still going — skipping this tick"
+  echo "$(date -Is) [${REGION}] another region is running — will retry next tick"
   exit 0
 fi
 

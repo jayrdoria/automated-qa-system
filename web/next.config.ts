@@ -11,6 +11,19 @@ const nextConfig: NextConfig = {
   env: {
     NEXT_PUBLIC_BASE_PATH: "/automated-qa-system",
   },
+  // With basePath set, "/" is not served at all — it 404s, which reads like a
+  // broken app rather than a wrong URL. `basePath: false` makes this redirect
+  // apply to the true root instead of being rewritten under the basePath.
+  async redirects() {
+    return [
+      {
+        source: "/",
+        destination: "/automated-qa-system",
+        basePath: false,
+        permanent: false,
+      },
+    ];
+  },
 };
 
 export default nextConfig;

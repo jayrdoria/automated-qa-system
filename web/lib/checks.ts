@@ -46,6 +46,13 @@ export const REGIONS = [
  */
 export const RUN_INTERVAL_MIN = 20;
 
+/**
+ * How often cron *offers* a region a chance to run. The region only actually
+ * runs if RUN_INTERVAL_MIN has elapsed since it last COMPLETED, so the next run
+ * lands on the first tick after it becomes due — not on a fixed clock.
+ */
+export const CRON_TICK_MIN = 5;
+
 /// How long a run may take before we stop calling it "running" and call it late.
 export const RUN_GRACE_MIN = 6;
 

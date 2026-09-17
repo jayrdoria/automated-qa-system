@@ -43,3 +43,36 @@ model CheckState {
   @@unique([brand, region, checkName])
   @@map("check_state")
 }
+
+/// Live progress of the currently-executing run, one row per brand+region.
+///
+/// Deliberately separate from CheckRun: that table is durable history and drives
+/// alerting, so it is written once at the end of a run as a single batch. This
+/// table is volatile UI state written on every test — mixing them would mean
+/// alert logic firing per-test and partial runs polluting history.
+model RunProgress {
+  id         String    @id @default(cuid())
+  brand      String
+  region     String
+  total      Int
+  completed  Int       @default(0)
+  passed     Int       @default(0)
+  failed     Int       @default(0)
+  /// The check executing right now. Lets each row show queued → running → result
+  /// instead of the whole grid blanking behind one aggregate percentage.
+  currentCheck String? @map("current_check")
+  /// When the current check started — lets the UI show elapsed time against
+  /// that check's historical median instead of an invented percentage.
+  currentStartedAt DateTime? @map("current_started_at")
+  /// Per-check outcomes for THIS run: { "login": "pass", "game-load": "fail" }.
+  /// Without it a finished check has nowhere to live until the end-of-run batch
+  /// writes check_run, so every completed row would sit on "Queued" and the
+  /// whole column would flip to Pass at once instead of draining row by row.
+  results      Json?
+  startedAt  DateTime  @map("started_at")
+  finishedAt DateTime? @map("finished_at")
+  updatedAt  DateTime  @updatedAt @map("updated_at")
+
+  @@unique([brand, region])
+  @@map("run_progress")
+}
