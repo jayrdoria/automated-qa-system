@@ -373,7 +373,7 @@ export default async function DashboardPage({
 
   return (
     <main className="mx-auto max-w-6xl px-6 py-10">
-      <AutoRefresh seconds={15} />
+      <AutoRefresh live={progressByRegion.size > 0} />
       <header className="mb-8 flex flex-wrap items-baseline justify-between gap-4">
         <div>
           <h1 className="text-2xl font-semibold tracking-tight">
