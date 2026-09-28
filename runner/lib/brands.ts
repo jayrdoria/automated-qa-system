@@ -21,7 +21,33 @@ import { getConfig } from "./config";
  * location that can actually reach the site.
  */
 
-export type BrandId = "stakes" | "x7";
+export type BrandId = "stakes" | "stakes3" | "stakescasino" | "x7";
+
+/**
+ * Which domain each market is tested against.
+ *
+ * ⚠ MUST MATCH `COLUMNS` in web/lib/checks.ts. The runner and the dashboard are
+ * separate npm packages with separate tsconfigs, so this table is deliberately
+ * duplicated rather than imported across the boundary. If they drift, the
+ * runner files results under a brand the dashboard never renders and the cells
+ * silently stay on "no data" while the checks pass.
+ */
+const COLUMNS: { region: string; site: BrandId }[] = [
+  { region: "FR", site: "stakes3" },
+  { region: "DE", site: "stakes" },
+  { region: "IT", site: "stakes3" },
+  { region: "ES", site: "stakes" },
+  { region: "BD", site: "stakescasino" },
+];
+
+/**
+ * Returns undefined for an unknown region rather than defaulting to a site.
+ * A typo'd CHECK_REGION that silently tested the wrong domain and filed the
+ * results under it would be far worse than a loud failure.
+ */
+export function siteForRegion(region: string): BrandId | undefined {
+  return COLUMNS.find((c) => c.region === region)?.site;
+}
 
 export interface BrandConfig {
   id: BrandId;
@@ -126,16 +152,64 @@ const RE = {
   password: /^(mot de passe|password|passwort|kennwort|contrase[nñ]a|senha)$/i,
 };
 
-function stakes(): BrandConfig {
-  const c = getConfig();
+/**
+ * Credentials are validated here, not in the config schema.
+ *
+ * getConfig() parses everything at once, so making STAKES3_PASSWORD required
+ * there would break the DE, ES and BD runs, which never touch it. Checking at
+ * the point of use keeps a missing key scoped to the one domain that needs it.
+ *
+ * There is deliberately NO fallback to another site's credentials. Falling back
+ * either reddens a healthy site (the account does not exist there) or passes
+ * while silently testing the wrong login — both worse than refusing to start.
+ */
+function requireCredential(value: string, envKey: string, domain: string): string {
+  if (value.trim() === "") {
+    throw new Error(
+      `${envKey} is empty — it is required to test ${domain}. ` +
+        `Set it in .env (use scripts/set-env.sh on the server). ` +
+        `Credentials are never shared between mirror domains.`,
+    );
+  }
+  return value;
+}
+
+/**
+ * stakes.com, stakes3.com and stakescasino.com are the SAME application on
+ * different hosts — verified against the live DOM on stakescasino.com: same
+ * header markup (`div.btn.btn-secondary`), same `button.btn-login` submit, same
+ * Zoho SalesIQ widget ids, same provider checkbox panel, same Hacksaw launcher
+ * iframe. So they share one selector set and differ only by host and account.
+ *
+ * Keeping this a single factory is what guarantees the DE/ES path is unchanged:
+ * stakesLike("stakes", ...) produces exactly the config that used to be
+ * hand-written for Stakes.
+ */
+function stakesLike(
+  id: BrandId,
+  label: string,
+  baseUrl: string,
+  username: string,
+  password: string,
+  /**
+   * Per-host corrections, applied last.
+   *
+   * Used sparingly and only where a host has been observed to differ. Keeping
+   * them as an explicit override — rather than widening the shared selectors —
+   * is what guarantees stakes.com and stakes3.com are unaffected: those two
+   * cannot be exercised from a non-EU IP, so a change to the shared set could
+   * not be verified before deploying it.
+   */
+  overrides: Partial<BrandConfig> = {},
+): BrandConfig {
   return {
-    id: "stakes",
-    label: "Stakes.com",
-    baseUrl: c.STAKES_BASE_URL,
-    username: c.STAKES_USERNAME,
-    password: c.STAKES_PASSWORD,
+    id,
+    label,
+    baseUrl,
+    username,
+    password,
     casinoPath: "/casino",
-    gameUrl: `${c.STAKES_BASE_URL}/game/hacksaw/wanted-dead-or-a-wild/real`,
+    gameUrl: `${baseUrl}/game/hacksaw/wanted-dead-or-a-wild/real`,
 
     // getByRole cannot match this button — its accessible name differs from its
     // visible text (verified: getByRole returned 0 matches while the DOM shows
@@ -192,7 +266,76 @@ function stakes(): BrandConfig {
     depositButton: (page) => clickable(page, RE.deposit).first(),
     cashierModal: (page) =>
       page.locator('.experience-cashier-modal, .experience-cashier-full').first(),
+    ...overrides,
   };
+}
+
+function stakes(): BrandConfig {
+  const c = getConfig();
+  return stakesLike(
+    "stakes",
+    "Stakes.com",
+    c.STAKES_BASE_URL,
+    c.STAKES_USERNAME,
+    c.STAKES_PASSWORD,
+  );
+}
+
+function stakes3(): BrandConfig {
+  const c = getConfig();
+  return stakesLike(
+    "stakes3",
+    "Stakes3.com",
+    c.STAKES3_BASE_URL,
+    requireCredential(c.STAKES3_USERNAME, "STAKES3_USERNAME", "stakes3.com"),
+    requireCredential(c.STAKES3_PASSWORD, "STAKES3_PASSWORD", "stakes3.com"),
+  );
+}
+
+function stakescasino(): BrandConfig {
+  const c = getConfig();
+  return stakesLike(
+    "stakescasino",
+    "StakesCasino.com",
+    c.STAKESCASINO_BASE_URL,
+    requireCredential(
+      c.STAKESCASINO_USERNAME,
+      "STAKESCASINO_USERNAME",
+      "stakescasino.com",
+    ),
+    requireCredential(
+      c.STAKESCASINO_PASSWORD,
+      "STAKESCASINO_PASSWORD",
+      "stakescasino.com",
+    ),
+    /*
+     * This host is served in ENGLISH (the exit node is outside the EU), which
+     * breaks two text matchers that are fine in FR/DE/IT/ES. Both are replaced
+     * by `.balance-deposit`, measured against the live site:
+     *
+     *            logged out   bad creds   logged in
+     *   matches       0            0           1
+     *
+     * 1. loggedInMarker — RE.loggedIn is UNANCHORED and contains "account", so
+     *    it matches the "Create account" button that is present while logged
+     *    OUT. login-rejects-bad-creds then reads a rejected login as a
+     *    successful one and fails a working site. The French "Créer un compte"
+     *    contains no such word, which is why only English trips it.
+     *
+     * 2. depositButton — RE.deposit is ANCHORED (^…$) and the element's text
+     *    content is "Deposit " WITH A TRAILING SPACE, so it matches nothing
+     *    even though the button is right there.
+     *
+     * `login` itself needs no override: it asserts the login trigger
+     * DISAPPEARS, which is language-independent and already passes here.
+     */
+    {
+      loggedInMarker: (page) =>
+        page.locator(".balance-deposit").filter({ visible: true }).first(),
+      depositButton: (page) =>
+        page.locator(".balance-deposit").filter({ visible: true }).first(),
+    },
+  );
 }
 
 function x7(): BrandConfig {
@@ -243,16 +386,40 @@ function x7(): BrandConfig {
 }
 
 export function getBrand(id: BrandId): BrandConfig {
-  return id === "stakes" ? stakes() : x7();
+  switch (id) {
+    case "stakes":
+      return stakes();
+    case "stakes3":
+      return stakes3();
+    case "stakescasino":
+      return stakescasino();
+    case "x7":
+      return x7();
+  }
 }
 
 /**
- * X7 is excluded unless X7_ENABLED=true. It is blocked by a Cloudflare
- * interactive challenge that a VPN cannot clear, so running its checks would
- * post 7 permanent failures and bury the Stakes signal under red.
+ * Exactly ONE domain is tested per run, chosen by CHECK_REGION.
+ *
+ * Each market is served by a single mirror, so a DE run must not also drive
+ * stakes3.com — that would double the traffic from one VPN exit and file
+ * results under a column that is not being checked.
+ *
+ * Returns an empty array for an unknown region, which makes every spec skip and
+ * the reporter post nothing, rather than guessing a domain.
+ *
+ * X7 is unreachable here by design: it has no entry in COLUMNS, so no region
+ * selects it. Its selectors stay wired up for the day its Cloudflare challenge
+ * is lifted and it earns a column.
  */
 export function activeBrands(): BrandId[] {
-  return getConfig().X7_ENABLED ? ["stakes", "x7"] : ["stakes"];
+  const site = siteForRegion(getConfig().CHECK_REGION);
+  return site ? [site] : [];
 }
 
-export const BRAND_IDS: BrandId[] = ["stakes", "x7"];
+export const BRAND_IDS: BrandId[] = [
+  "stakes",
+  "stakes3",
+  "stakescasino",
+  "x7",
+];

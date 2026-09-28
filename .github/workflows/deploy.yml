@@ -87,11 +87,36 @@ jobs:
           # the dashboard is reached via ProxyPass, which resolves before the
           # filesystem, so the deny rule does not affect the running app.
           APP_DIR: /home/admin/web/employee.netovation.eu/public_html/automated-qa-system
+          # Brand test accounts, synced to the server .env on every deploy so
+          # rotating an account never requires an SSH session. Deliberately ONLY
+          # the per-brand logins: POSTGRES_PASSWORD, INGEST_TOKEN and
+          # DATABASE_URL differ per environment and are never pushed from here —
+          # scripts/set-env.sh refuses them outright as a second line of defence.
+          #
+          # An unset secret arrives as an empty string, and the sync SKIPS
+          # empties rather than writing them. That is what makes listing a key
+          # here harmless: until its secret actually exists the server value is
+          # left exactly as it is. So every brand is listed, and each activates
+          # only when you choose to set its secret.
+          #
+          # Base URLs are NOT synced. They are configuration rather than
+          # credentials, they change almost never, and a wrong one takes a brand
+          # down — set those with scripts/set-env.sh if a host ever moves.
+          STAKES_USERNAME: ${{ secrets.STAKES_USERNAME }}
+          STAKES_PASSWORD: ${{ secrets.STAKES_PASSWORD }}
+          STAKES3_USERNAME: ${{ secrets.STAKES3_USERNAME }}
+          STAKES3_PASSWORD: ${{ secrets.STAKES3_PASSWORD }}
+          STAKESCASINO_USERNAME: ${{ secrets.STAKESCASINO_USERNAME }}
+          STAKESCASINO_PASSWORD: ${{ secrets.STAKESCASINO_PASSWORD }}
+          # Dormant: x7 has no entry in COLUMNS so it never runs. Wired up now
+          # so enabling it later is a secret plus a push, not an SSH session.
+          X7_USERNAME: ${{ secrets.X7_USERNAME }}
+          X7_PASSWORD: ${{ secrets.X7_PASSWORD }}
         with:
           host: ${{ secrets.VPS_HOST }}
           username: ${{ secrets.VPS_USER }}
           key: ${{ secrets.VPS_SSH_KEY }}
-          envs: GHCR_TOKEN,APP_DIR
+          envs: GHCR_TOKEN,APP_DIR,STAKES_USERNAME,STAKES_PASSWORD,STAKES3_USERNAME,STAKES3_PASSWORD,STAKESCASINO_USERNAME,STAKESCASINO_PASSWORD,X7_USERNAME,X7_PASSWORD
           script: |
             set -euo pipefail
 
@@ -100,6 +125,72 @@ jobs:
 
             # compose file, apache snippet and cron wrapper live on the server
             git pull
+
+            # ── Guard: the server .env must not carry local development values ──
+            #
+            # The local and production .env files differ by design, and uploading
+            # the local one over the server's has happened. It is invisible at the
+            # time: running containers keep their old environment, so everything
+            # looks healthy until a deploy recreates them — at which point web
+            # cannot authenticate to Postgres and the health gate fails.
+            #
+            # By then `up -d web` has already replaced the working container, so
+            # the dashboard is down. Checking here, before any docker command,
+            # turns that outage into a failed deploy with the old container still
+            # serving traffic.
+            #
+            # DATABASE_URL is checked by presence alone: production must not have
+            # it at all, since compose builds it from POSTGRES_* and the container
+            # hostname. Any value here is wrong by definition.
+            if grep -qE '^(POSTGRES_PASSWORD=qa_local_dev_pw|INGEST_TOKEN=local_dev_token|DATABASE_URL=)' .env; then
+              echo "ABORT: the server .env contains local development values."
+              echo "Offending keys (values redacted):"
+              grep -nE '^(POSTGRES_PASSWORD=qa_local_dev_pw|INGEST_TOKEN=local_dev_token|DATABASE_URL=)' .env \
+                | sed 's/=.*/=<redacted>/'
+              echo ""
+              echo "Nothing was changed — the running containers are untouched."
+              echo "Fix .env with scripts/set-env.sh, then re-run this deploy."
+              exit 1
+            fi
+
+            # ── Sync brand credentials from repository secrets ──────────────
+            #
+            # Adding or rotating a mirror account should not require an SSH
+            # session. These are written into the server .env here, before any
+            # container is created, so the next cron run picks them up.
+            #
+            # Three deliberate safety properties:
+            #   1. WHITELIST — only per-brand logins are ever written. The keys
+            #      that differ per environment are not in this list at all.
+            #   2. SKIP EMPTY — an unset repository secret arrives as "". Writing
+            #      it would overwrite a working credential with a blank and break
+            #      the brand on the next tick, so empties are skipped, not synced.
+            #   3. set-env.sh REFUSES the protected keys even if one were passed,
+            #      so a mistake in this file cannot reach POSTGRES_PASSWORD.
+            #
+            # Invoked via `bash` rather than ./: the repo is developed on Windows
+            # where core.filemode is false, so the executable bit is not reliably
+            # recorded and ./scripts/set-env.sh could fail with permission denied.
+            cp .env .env.predeploy
+
+            sync_cred() {
+              if [ -z "${2:-}" ]; then
+                echo "  $1: no repository secret set — server value left untouched"
+                return 0
+              fi
+              bash scripts/set-env.sh "$1" "$2" > /dev/null
+              echo "  $1: synced"
+            }
+
+            echo "Syncing brand credentials from repository secrets:"
+            sync_cred STAKES_USERNAME       "${STAKES_USERNAME:-}"
+            sync_cred STAKES_PASSWORD       "${STAKES_PASSWORD:-}"
+            sync_cred STAKES3_USERNAME      "${STAKES3_USERNAME:-}"
+            sync_cred STAKES3_PASSWORD      "${STAKES3_PASSWORD:-}"
+            sync_cred STAKESCASINO_USERNAME "${STAKESCASINO_USERNAME:-}"
+            sync_cred STAKESCASINO_PASSWORD "${STAKESCASINO_PASSWORD:-}"
+            sync_cred X7_USERNAME           "${X7_USERNAME:-}"
+            sync_cred X7_PASSWORD           "${X7_PASSWORD:-}"
 
             docker pull ghcr.io/jayrdoria/automated-qa-system-web:latest
             docker pull ghcr.io/jayrdoria/automated-qa-system-web:migrate

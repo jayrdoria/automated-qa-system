@@ -2,11 +2,14 @@ import { test, expect } from "@playwright/test";
 import { BRAND_IDS, activeBrands, getBrand } from "../../lib/brands";
 import { login, loginAndVerify } from "../../lib/login";
 
-// X7 skipped while it is Cloudflare-blocked — see activeBrands().
+// Exactly ONE domain runs per region: activeBrands() resolves CHECK_REGION to
+// its mirror (FR/IT -> stakes3, DE/ES -> stakes, BD -> stakescasino) and the
+// rest skip. The describe-block title stays equal to the brand id, which is
+// what the reporter files results under.
 for (const id of BRAND_IDS) {
   const enabled = () => activeBrands().includes(id);
   test.describe(id, () => {
-    test.skip(() => !enabled(), "brand deferred (X7_ENABLED=false)");
+    test.skip(() => !enabled(), "not the domain for this CHECK_REGION");
     test("login", async ({ page }) => {
       await loginAndVerify(page, getBrand(id));
     });

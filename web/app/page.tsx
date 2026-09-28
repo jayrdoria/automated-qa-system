@@ -1,12 +1,13 @@
 import { prisma } from "@/lib/prisma";
 import {
-  BRANDS,
   BRAND_LABELS,
+  SITE_DOMAINS,
   CHECKS,
-  REGIONS,
+  COLUMNS,
   DEFERRED_BRANDS,
   RUN_INTERVAL_MIN,
   RUN_GRACE_MIN,
+  STALE_AFTER_MIN,
 } from "@/lib/checks";
 import { RunStatus } from "./RunStatus";
 import { AutoRefresh } from "./AutoRefresh";
@@ -15,10 +16,10 @@ import { RunningCell } from "./RunningCell";
 // Cron writes new rows every 20 min — never cache this.
 export const dynamic = "force-dynamic";
 
-/// A check whose last run is older than this is reported as stale rather than
-/// passing. Without it, a dead cron looks identical to everything being green,
-/// which is the most dangerous failure mode a monitoring dashboard has.
-const STALE_AFTER_MS = 45 * 60 * 1000;
+/// Defined in lib/checks.ts because it is a function of RUN_INTERVAL_MIN and
+/// the number of columns contending for the global run lock — not a property
+/// of the page.
+const STALE_AFTER_MS = STALE_AFTER_MIN * 60 * 1000;
 
 type Status =
   | "pass"
@@ -282,10 +283,16 @@ export default async function DashboardPage({
    * its own rows. If every check has a fresh result, the run is over whatever
    * the ping said.
    */
-  const fullResultsSince = (region: string, since: Date) =>
+  /*
+   * Takes the brand explicitly. It used to hardcode `x.brand === "stakes"`,
+   * which meant that once FR and IT moved to stakes3 no result ever matched,
+   * the run never looked complete, and those headers stayed pinned at
+   * "n/7 running" forever.
+   */
+  const fullResultsSince = (brand: string, region: string, since: Date) =>
     CHECKS.every((c) => {
       const r = latestRuns.find(
-        (x) => x.region === region && x.check_name === c.id && x.brand === "stakes",
+        (x) => x.region === region && x.check_name === c.id && x.brand === brand,
       );
       return r !== undefined && r.started_at >= since;
     });
@@ -296,7 +303,7 @@ export default async function DashboardPage({
         (p) =>
           p.finishedAt === null &&
           Date.now() - p.startedAt.getTime() < RUN_GRACE_MIN * 60_000 &&
-          !fullResultsSince(p.region, p.startedAt),
+          !fullResultsSince(p.brand, p.region, p.startedAt),
       )
       .map((p) => [
         p.region,
@@ -336,40 +343,41 @@ export default async function DashboardPage({
     }
   }
 
-  // ALL four markets are always rendered, including ones with no data yet.
-  // Hiding empty regions would make "we never ran DE" look identical to "DE
-  // isn't monitored" — the operator needs to see the full coverage grid and
-  // spot a region that has silently stopped reporting.
-  const shownRegions = REGIONS;
+  // EVERY column is always rendered, including ones with no data yet. Hiding
+  // empty columns would make "we never ran DE" look identical to "DE isn't
+  // monitored" — the operator needs the full coverage grid to spot a column
+  // that has silently stopped reporting.
+  const shownColumns = COLUMNS;
 
   // Surfaced above the matrix so a failure is readable at a glance — the grid
   // says WHICH cell is red, this says WHY, without a click.
-  const currentFailures = BRANDS.filter((b) => !DEFERRED_BRANDS.includes(b)).flatMap((b) =>
-    shownRegions.flatMap((rg) =>
-      CHECKS.flatMap((c) => {
-        const last = byKey.get(`${b}:${rg.id}:${c.id}`);
-        // A region mid-run has no current verdict — excluded so the failures
-        // panel doesn't flash last cycle's errors while they are being retested.
-        if (progressByRegion.has(rg.id)) return [];
-        if (statusOf(last) !== "fail") return [];
-        return [{
-          key: `${b}:${rg.id}:${c.id}`,
-          brand: BRAND_LABELS[b],
-          region: rg.id,
+  const currentFailures = shownColumns.flatMap((col) =>
+    CHECKS.flatMap((c) => {
+      const last = byKey.get(`${col.site}:${col.region}:${c.id}`);
+      // A column mid-run has no current verdict — excluded so the failures
+      // panel doesn't flash last cycle's errors while they are being retested.
+      if (progressByRegion.has(col.region)) return [];
+      if (statusOf(last) !== "fail") return [];
+      return [
+        {
+          key: `${col.site}:${col.region}:${c.id}`,
+          brand: BRAND_LABELS[col.site],
+          region: col.region,
           check: c.label,
           error: cleanError(last?.error),
-        }];
-      }),
-    ),
+        },
+      ];
+    }),
   );
 
-  const failing = BRANDS.filter((b) => !DEFERRED_BRANDS.includes(b)).flatMap((b) =>
-    shownRegions
-      .filter((rg) => !progressByRegion.has(rg.id))
-      .flatMap((rg) =>
-        CHECKS.map((c) => statusOf(byKey.get(`${b}:${rg.id}:${c.id}`))),
+  const failing = shownColumns
+    .filter((col) => !progressByRegion.has(col.region))
+    .flatMap((col) =>
+      CHECKS.map((c) =>
+        statusOf(byKey.get(`${col.site}:${col.region}:${c.id}`)),
       ),
-  ).filter((s) => s === "fail").length;
+    )
+    .filter((s) => s === "fail").length;
 
   return (
     <main className="mx-auto max-w-6xl px-6 py-10">
@@ -380,8 +388,8 @@ export default async function DashboardPage({
             Automated QA Monitor
           </h1>
           <p className="mt-1 text-sm text-neutral-500 dark:text-neutral-400">
-            Stakes.com &amp; X7 Casino · {shownRegions.map((r) => r.id).join(" · ")}{" "}
-            · each market checked every {RUN_INTERVAL_MIN} minutes
+            {shownColumns.map((c) => c.region).join(" · ")} · each column checked
+            every {RUN_INTERVAL_MIN} minutes
           </p>
         </div>
         <span
@@ -415,66 +423,62 @@ export default async function DashboardPage({
         </section>
       )}
 
-      {BRANDS.map((brand) => {
-        const deferred = DEFERRED_BRANDS.includes(brand);
-        return (
-          <section key={brand} className="mb-10">
-            <h2 className="mb-3 flex items-center gap-2 text-sm font-semibold uppercase tracking-wide text-neutral-500 dark:text-neutral-400">
-              {BRAND_LABELS[brand]}
-              {deferred && (
-                <span className="rounded bg-neutral-200 px-2 py-0.5 text-[11px] font-medium normal-case tracking-normal text-neutral-600 dark:bg-neutral-800 dark:text-neutral-400">
-                  deferred — Cloudflare challenge
-                </span>
-              )}
-            </h2>
-
-            {/* Matrix: one row per check, one column per market. Repeating the
-                full grid per region made four near-identical blocks and buried
-                the one cell that differs. */}
+          <section className="mb-10">
+            {/* One matrix for everything. Each column is a (market, domain)
+                pair, because a market is served by exactly one mirror — so
+                the domain belongs in the header, not in a separate table per
+                brand. Splitting by brand would put FR and DE in different
+                blocks and hide the one cell that differs. */}
             <div className="overflow-x-auto rounded-lg border border-neutral-200 dark:border-neutral-800">
               <table className="w-full border-collapse text-sm">
                 <thead>
                   <tr className="bg-neutral-50 dark:bg-neutral-900">
                     <th className="px-4 py-2 text-left font-medium">Check</th>
-                    {shownRegions.map((r) => (
+                    {shownColumns.map((col) => (
                       <th
-                        key={r.id}
+                        key={col.region}
                         className="px-3 py-2 text-center font-medium"
-                        title={r.label}
+                        title={`${col.label} · ${SITE_DOMAINS[col.site]}`}
                       >
                         <div className="flex flex-col items-center leading-tight">
-                          <span>{r.id}</span>
-                          {!deferred &&
-                            (() => {
-                              const live = progressByRegion.get(r.id);
-                              if (!live) {
-                                return (
-                                  <RunStatus
-                                    cronOffset={r.cronOffset}
-                                    lastFinishedIso={
-                                      lastFinishedByRegion.get(r.id) ?? null
-                                    }
-                                    lastRunIso={lastRunByRegion.get(r.id) ?? null}
-                                  />
-                                );
-                              }
-                              const pct = Math.round(
-                                (live.completed / live.total) * 100,
-                              );
+                          <span>{col.region}</span>
+                          {/* The whole point of the mirror split: without this
+                              you cannot tell which host a green cell refers to. */}
+                          <span className="text-[10px] font-normal text-neutral-400 dark:text-neutral-500">
+                            {SITE_DOMAINS[col.site]}
+                          </span>
+                          {(() => {
+                            const live = progressByRegion.get(col.region);
+                            if (!live) {
                               return (
-                                <span className="flex flex-col items-center gap-0.5">
-                                  <span className="text-[11px] font-medium tabular-nums text-sky-600 dark:text-sky-400">
-                                    {live.completed}/{live.total} · {pct}%
-                                  </span>
-                                  <span className="h-1 w-12 overflow-hidden rounded-full bg-neutral-200 dark:bg-neutral-800">
-                                    <span
-                                      className="block h-full rounded-full bg-sky-500 transition-all"
-                                      style={{ width: `${pct}%` }}
-                                    />
-                                  </span>
-                                </span>
+                                <RunStatus
+                                  cronOffset={col.cronOffset}
+                                  lastFinishedIso={
+                                    lastFinishedByRegion.get(col.region) ?? null
+                                  }
+                                  lastRunIso={
+                                    lastRunByRegion.get(col.region) ?? null
+                                  }
+                                />
                               );
-                            })()}
+                            }
+                            const pct = Math.round(
+                              (live.completed / live.total) * 100,
+                            );
+                            return (
+                              <span className="flex flex-col items-center gap-0.5">
+                                <span className="text-[11px] font-medium tabular-nums text-sky-600 dark:text-sky-400">
+                                  {live.completed}/{live.total} · {pct}%
+                                </span>
+                                <span className="h-1 w-12 overflow-hidden rounded-full bg-neutral-200 dark:bg-neutral-800">
+                                  <span
+                                    className="block h-full rounded-full bg-sky-500 transition-all"
+                                    style={{ width: `${pct}%` }}
+                                  />
+                                </span>
+                              </span>
+                            );
+                          })()}
                         </div>
                       </th>
                     ))}
@@ -487,11 +491,11 @@ export default async function DashboardPage({
                       className="border-t border-neutral-200 dark:border-neutral-800"
                     >
                       <td className="px-4 py-2 font-medium">{check.label}</td>
-                      {shownRegions.map((region) => {
+                      {shownColumns.map((region) => {
                         const last = byKey.get(
-                          `${brand}:${region.id}:${check.id}`,
+                          `${region.site}:${region.region}:${check.id}`,
                         );
-                        const live = progressByRegion.get(region.id);
+                        const live = progressByRegion.get(region.region);
                         /*
                          * While a region is mid-run, any result older than that
                          * run's start is last cycle's answer. Showing it as a
@@ -529,9 +533,11 @@ export default async function DashboardPage({
                         const notYetRerun =
                           live !== undefined &&
                           (!last || last.startedAt < live.startedAt);
-                        const status: Status = deferred
-                          ? "deferred"
-                          : live && live.currentCheck === check.id
+                        // No "deferred" branch here: every column in COLUMNS is
+                        // actively monitored. X7 is the only deferred brand and
+                        // it has no column — it renders in its own section below.
+                        const status: Status =
+                          live && live.currentCheck === check.id
                             ? "running"
                             : liveResult
                               ? liveResult
@@ -539,7 +545,10 @@ export default async function DashboardPage({
                                 ? "queued"
                                 : statusOf(last);
                         return (
-                          <td key={region.id} className="px-3 py-2 text-center">
+                          <td
+                            key={region.region}
+                            className="px-3 py-2 text-center"
+                          >
                             <span
                               title={
                                 last
@@ -573,8 +582,25 @@ export default async function DashboardPage({
               </table>
             </div>
           </section>
-        );
-      })}
+
+          {/* X7 has no column — it is a different operator, still behind a
+              Cloudflare interactive challenge that a VPN cannot clear. Shown
+              as deferred rather than omitted, so "not monitored" never reads
+              as "monitored and healthy". */}
+          {DEFERRED_BRANDS.map((brand) => (
+            <section key={brand} className="mb-10">
+              <h2 className="mb-3 flex items-center gap-2 text-sm font-semibold uppercase tracking-wide text-neutral-500 dark:text-neutral-400">
+                {BRAND_LABELS[brand as keyof typeof BRAND_LABELS] ?? brand}
+                <span className="rounded bg-neutral-200 px-2 py-0.5 text-[11px] font-medium normal-case tracking-normal text-neutral-600 dark:bg-neutral-800 dark:text-neutral-400">
+                  deferred — Cloudflare challenge
+                </span>
+              </h2>
+              <div className="rounded-lg border border-dashed border-neutral-300 p-4 text-sm text-neutral-500 dark:border-neutral-700">
+                Not monitored. No market routes to this brand, so it has no
+                column in the grid above.
+              </div>
+            </section>
+          ))}
 
       <section>
         <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
@@ -597,7 +623,7 @@ export default async function DashboardPage({
               <thead className="bg-neutral-50 text-left dark:bg-neutral-900">
                 <tr>
                   <th className="px-4 py-2 font-medium">When</th>
-                  <th className="px-4 py-2 font-medium">Brand</th>
+                  <th className="px-4 py-2 font-medium">Domain</th>
                   <th className="px-4 py-2 font-medium">Region</th>
                   <th className="px-4 py-2 font-medium">Check</th>
                   <th className="px-4 py-2 font-medium">Status</th>
@@ -614,7 +640,13 @@ export default async function DashboardPage({
                     <td className="whitespace-nowrap px-4 py-2 text-neutral-500">
                       {timeAgo(run.startedAt)}
                     </td>
-                    <td className="px-4 py-2">{run.brand}</td>
+                    {/* The host, not the brand id — after the mirror split a
+                        bare "stakes3" tells you less than "stakes3.com", and
+                        historical rows may carry a brand no longer in COLUMNS. */}
+                    <td className="px-4 py-2">
+                      {SITE_DOMAINS[run.brand as keyof typeof SITE_DOMAINS] ??
+                        run.brand}
+                    </td>
                     <td className="px-4 py-2 text-neutral-500">{run.region}</td>
                     <td className="px-4 py-2">{run.checkName}</td>
                     <td className="px-4 py-2">

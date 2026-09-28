@@ -4,6 +4,88 @@ Validation and launch. Work top to bottom; each gate assumes the one above passe
 
 ---
 
+## ⛔ Never upload a whole `.env` to the server
+
+The local and production `.env` files are **not interchangeable**. Three keys
+differ on purpose:
+
+| Key | Local | Production |
+|---|---|---|
+| `POSTGRES_PASSWORD` | `qa_local_dev_pw` | real generated secret |
+| `INGEST_TOKEN` | any 32+ char string | real generated secret |
+| `DATABASE_URL` | `…@localhost:5433/…` | **must not exist** — compose builds it |
+
+Copying the local file over the server's has happened, and the failure is
+silent. Running containers keep their environment until recreated, so nothing
+looks wrong — meanwhile the runner (recreated on every cron run) starts sending
+the local token, web rejects every result with **401**, and the reporter logs it
+without failing the run. Cron reports `rc=0`, checks pass, and the dashboard
+quietly stops updating. The next deploy then takes web down for real.
+
+To change a value on the server, use the upsert script instead:
+
+```bash
+bash scripts/set-env.sh STAKES3_PASSWORD 'the-password'
+bash scripts/set-env.sh --show STAKES3_PASSWORD   # verdict only, never the value
+```
+
+(Invoked via `bash` because the repo is developed on Windows with
+`core.filemode=false`, so the executable bit is not reliably recorded.)
+
+### Brand credentials sync themselves — don't SSH for those
+
+Brand logins are stored as **repository secrets** and written into the server
+`.env` automatically on every deploy, before any container is created:
+
+| Secret | Used by | Set it? |
+|---|---|---|
+| `STAKES3_USERNAME` / `STAKES3_PASSWORD` | stakes3.com (FR, IT) | **Yes — required** |
+| `STAKESCASINO_USERNAME` / `STAKESCASINO_PASSWORD` | stakescasino.com (BD) | **Yes — required** |
+| `STAKES_USERNAME` / `STAKES_PASSWORD` | stakes.com (DE, ES) | Optional — only to rotate |
+| `X7_USERNAME` / `X7_PASSWORD` | x7casino.com | Optional — dormant, x7 has no column |
+
+The last four are **listed but not required**. Because an unset secret is
+skipped, leaving them empty means the deploy touches nothing and the values
+already on the server keep working. Set one only when you want to rotate that
+account — then it is a secret change plus a push, with no SSH.
+
+Repository secrets are encrypted at rest and never appear in the repo or in any
+commit. To rotate a brand account: update the secret in
+**Settings → Secrets and variables → Actions**, then push. No SSH.
+
+Three safety properties, all verified:
+
+1. **Whitelist** — only the four brand logins are ever written. The
+   environment-specific keys are not in the list at all.
+2. **Skip empty** — an unset secret arrives as `""`. It is *skipped*, never
+   written, because blanking a working credential would break that brand on the
+   next cron tick.
+3. **Defence in depth** — `set-env.sh` refuses `POSTGRES_PASSWORD`,
+   `INGEST_TOKEN` and `DATABASE_URL` regardless, so a mistake in the workflow
+   cannot reach them.
+
+Base URLs (`STAKES_BASE_URL`, `X7_BASE_URL`) are **not** synced. They are
+configuration rather than credentials, they change almost never, and a wrong one
+takes a brand down. Use `set-env.sh` if a host ever moves.
+
+It replaces-or-appends without leaving duplicates, backs up to `.env.bak`, and
+refuses the three keys above unless given `--force`.
+
+A guard in `.github/workflows/deploy.yml` also aborts the deploy — before any
+docker command runs — if it finds local values on the server, so a slip costs a
+failed deploy rather than an outage.
+
+If the values are ever lost, the running containers still hold them:
+
+```bash
+docker inspect automated-qa-system-postgres-1 \
+  --format '{{range .Config.Env}}{{println .}}{{end}}' | grep POSTGRES_PASSWORD
+docker inspect automated-qa-system-web-1 \
+  --format '{{range .Config.Env}}{{println .}}{{end}}' | grep INGEST_TOKEN
+```
+
+---
+
 ## ⛔ Gate 0 — Edge access (BLOCKING)
 
 Nothing below can be validated until this passes. **As of the last check, both

@@ -4,11 +4,18 @@ import { z } from "zod";
 import { prisma } from "@/lib/prisma";
 import { getEnv } from "@/lib/env";
 import { processResults } from "@/lib/alerting";
+import { BRANDS } from "@/lib/checks";
 
 export const dynamic = "force-dynamic";
 
 const resultSchema = z.object({
-  brand: z.enum(["stakes", "x7"]),
+  /*
+   * Sourced from BRANDS rather than a literal list. When this was hardcoded to
+   * ["stakes","x7"], adding a mirror domain meant the runner POSTed valid
+   * results and got a 400 — the reporter logs the rejection but never fails the
+   * run, so cron reported success while the dashboard silently received nothing.
+   */
+  brand: z.enum(BRANDS),
   region: z.string().regex(/^[A-Z]{2}$/).default("FR"),
   checkName: z.string().min(1).max(64),
   status: z.enum(["pass", "fail"]),

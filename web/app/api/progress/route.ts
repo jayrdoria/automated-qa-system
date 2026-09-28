@@ -3,6 +3,7 @@ import { timingSafeEqual } from "node:crypto";
 import { z } from "zod";
 import { prisma } from "@/lib/prisma";
 import { getEnv } from "@/lib/env";
+import { BRANDS } from "@/lib/checks";
 
 export const dynamic = "force-dynamic";
 
@@ -16,7 +17,8 @@ export const dynamic = "force-dynamic";
  * into history. This endpoint cannot affect either.
  */
 const schema = z.object({
-  brand: z.enum(["stakes", "x7"]),
+  // Same list as /api/results — see the note there on why this is not literal.
+  brand: z.enum(BRANDS),
   region: z.string().regex(/^[A-Z]{2}$/),
   total: z.number().int().positive().max(100),
   completed: z.number().int().nonnegative().max(100),

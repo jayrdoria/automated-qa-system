@@ -22,11 +22,14 @@ MARKER="# automated-qa-system"
 #
 # The 1-minute offsets keep the four regions from contending for the lock in the
 # same second; the lock makes it correct, the offsets make it tidy.
+# The offsets MUST match cronOffset in web/lib/checks.ts (COLUMNS). The UI
+# computes "next run" from those; if they drift, the countdown silently lies.
 BLOCK="${MARKER} (managed — edit scripts/install-cron.sh, not crontab)
 0,5,10,15,20,25,30,35,40,45,50,55 * * * * ${APP_DIR}/scripts/run-checks.sh FR >> ${APP_DIR}/logs/cron-FR.log 2>&1
 1,6,11,16,21,26,31,36,41,46,51,56 * * * * ${APP_DIR}/scripts/run-checks.sh DE >> ${APP_DIR}/logs/cron-DE.log 2>&1
 2,7,12,17,22,27,32,37,42,47,52,57 * * * * ${APP_DIR}/scripts/run-checks.sh IT >> ${APP_DIR}/logs/cron-IT.log 2>&1
 3,8,13,18,23,28,33,38,43,48,53,58 * * * * ${APP_DIR}/scripts/run-checks.sh ES >> ${APP_DIR}/logs/cron-ES.log 2>&1
+4,9,14,19,24,29,34,39,44,49,54,59 * * * * ${APP_DIR}/scripts/run-checks.sh BD >> ${APP_DIR}/logs/cron-BD.log 2>&1
 0 4 1 * * ${APP_DIR}/scripts/cleanup.sh >> ${APP_DIR}/logs/cleanup.log 2>&1
 ${MARKER} end"
 

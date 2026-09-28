@@ -11,13 +11,21 @@
 # MailCraft and n8n are untouched.
 set -euo pipefail
 
+# The region also selects WHICH DOMAIN is checked — see COLUMNS in
+# web/lib/checks.ts and runner/lib/brands.ts:
+#   FR, IT -> stakes3.com      DE, ES -> stakes.com      BD -> stakescasino.com
+#
+# BD is not a market the brand sells to. stakescasino.com is geo-blocked from
+# the Singapore VPS like the others, and a Bangladesh exit is simply one that
+# reaches it, so it routes through the same tunnel as everything else.
 REGION="${1:-FR}"
 case "$REGION" in
   FR) COUNTRY="France" ;;
   DE) COUNTRY="Germany" ;;
   IT) COUNTRY="Italy" ;;
   ES) COUNTRY="Spain" ;;
-  *) echo "Unknown region '$REGION' (expected FR|DE|IT|ES)" >&2; exit 2 ;;
+  BD) COUNTRY="Bangladesh" ;;
+  *) echo "Unknown region '$REGION' (expected FR|DE|IT|ES|BD)" >&2; exit 2 ;;
 esac
 # Drop the region arg — anything left is passed through to playwright. Without
 # this the region lands in "$@" and docker tries to exec "FR" as the command.
@@ -38,6 +46,9 @@ APP_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 #   GLOBAL lock  — only one region runs at a time, whatever the clock says.
 #                  Four concurrent VPN tunnels + browsers would spike RAM on a
 #                  box that also runs MailCraft, n8n and two Postgres instances.
+# ⚠ DUPLICATED as RUN_INTERVAL_MIN in web/lib/checks.ts. Change one and you must
+# change the other, or the dashboard countdown disagrees with the scheduler and
+# reports columns as overdue while they are running exactly on time.
 MIN_INTERVAL_MIN="${MIN_INTERVAL_MIN:-20}"
 STAMP="${APP_DIR}/logs/.last-complete-${REGION}"
 LOCK_FILE="/tmp/automated-qa-system.lock"          # global, not per-region

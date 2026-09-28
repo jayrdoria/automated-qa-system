@@ -1,10 +1,16 @@
 # Dependencies
 node_modules/
 
-# Environment files — never commit these
+# Environment files — never commit these.
+#
+# Broad on purpose: the old rules matched only .env, .env.local and
+# .env.*.local, which left real credential files like .env.bak, .env.broken.*
+# and .env.new (all produced by routine .env surgery) untracked but committable.
+# Ignore every .env* variant and re-include only the tracked templates.
 .env
-.env.local
-.env.*.local
+.env.*
+!.env.example
+!.env.*.example
 
 # Playwright / run artifacts (screenshots, traces, reports, logs, alert state)
 artifacts/

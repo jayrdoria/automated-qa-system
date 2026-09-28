@@ -8,6 +8,33 @@ import type {
 } from "@playwright/test/reporter";
 import path from "node:path";
 import { getConfig } from "../lib/config";
+import { BRAND_IDS, siteForRegion, type BrandId } from "../lib/brands";
+
+/**
+ * Is this describe-block title one of our brands?
+ *
+ * This guard used to be `brand !== "stakes" && brand !== "x7"`, hardcoded in
+ * three places. Once specs began describing stakes3 and stakescasino, that
+ * check discarded every result BEFORE it was recorded — the run passed, exited
+ * 0, and posted nothing, while onEnd logged "no monitored checks ran". A green
+ * pipeline monitoring nothing is the worst outcome this system can produce, so
+ * the brand list now comes from one place.
+ */
+function isBrand(title: string): title is BrandId {
+  return (BRAND_IDS as string[]).includes(title);
+}
+
+/**
+ * The single domain this run is testing, derived from CHECK_REGION.
+ * Used for the progress row, which is keyed by brand+region.
+ */
+function currentSite(): BrandId | undefined {
+  try {
+    return siteForRegion(getConfig().CHECK_REGION);
+  } catch {
+    return undefined;
+  }
+}
 
 /**
  * Collects every check result and POSTs them in one batch at the end of the run.
@@ -57,6 +84,9 @@ export default class QaReporter implements Reporter {
       return;
     }
     if (this.monitoredTotal === 0) return;
+    // No column for this region — nothing ran, so there is no progress to report.
+    const site = currentSite();
+    if (!site) return;
     const url = cfg.INGEST_URL.replace(/\/results$/, "/progress");
     void fetch(url, {
       method: "POST",
@@ -65,7 +95,7 @@ export default class QaReporter implements Reporter {
         authorization: `Bearer ${cfg.INGEST_TOKEN}`,
       },
       body: JSON.stringify({
-        brand: "stakes",
+        brand: site,
         region: cfg.CHECK_REGION,
         total: this.monitoredTotal,
         completed: this.completed,
@@ -93,12 +123,8 @@ export default class QaReporter implements Reporter {
      * denominator 14 instead of 7, so a fully successful run displayed as
      * "7/14 · 50%" and the bar never filled.
      */
-    let active: string[] = ["stakes"];
-    try {
-      active = getConfig().X7_ENABLED ? ["stakes", "x7"] : ["stakes"];
-    } catch {
-      // config unavailable — fall back to the non-deferred brand
-    }
+    const site = currentSite();
+    const active: string[] = site ? [site] : [];
     this.monitoredTotal = suite
       .allTests()
       .filter(
@@ -115,7 +141,7 @@ export default class QaReporter implements Reporter {
   /** Checks run sequentially (workers: 1), so there is exactly one at a time. */
   onTestBegin(testCase: TestCase): void {
     const brand = testCase.parent.title;
-    if (brand !== "stakes" && brand !== "x7") return;
+    if (!isBrand(brand)) return;
     if (testCase.title.startsWith("pipeline smoke")) return;
     this.currentCheck = testCase.title;
     this.currentStartedAt = new Date().toISOString();
@@ -129,7 +155,7 @@ export default class QaReporter implements Reporter {
 
     // Skip the deploy-gate smoke test — it isn't a monitored check.
     if (checkName.startsWith("pipeline smoke")) return;
-    if (brand !== "stakes" && brand !== "x7") return;
+    if (!isBrand(brand)) return;
 
     // A skipped check produced NO evidence. Reporting it as "fail" (anything
     // not "passed") would post deferred X7 checks as 7 failures every run and
