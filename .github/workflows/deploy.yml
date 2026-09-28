@@ -139,13 +139,24 @@ jobs:
             # turns that outage into a failed deploy with the old container still
             # serving traffic.
             #
+            # Matched by PROPERTY, never by literal value. Spelling the local
+            # values out here as KEY=value pairs is indistinguishable from a
+            # committed credential — secret scanners flag it, correctly, and an
+            # alert you are trained to ignore is worse than no alert at all.
+            #
+            # Every local placeholder carries the marker "local_dev" by
+            # convention, so one substring catches them all — including any
+            # future placeholder that follows the same rule. A generated
+            # production secret containing that exact string is not a realistic
+            # collision. See .env.example for the convention itself.
+            #
             # DATABASE_URL is checked by presence alone: production must not have
             # it at all, since compose builds it from POSTGRES_* and the container
             # hostname. Any value here is wrong by definition.
-            if grep -qE '^(POSTGRES_PASSWORD=qa_local_dev_pw|INGEST_TOKEN=local_dev_token|DATABASE_URL=)' .env; then
+            if grep -qE '^(POSTGRES_PASSWORD|INGEST_TOKEN)=.*local_dev|^DATABASE_URL=' .env; then
               echo "ABORT: the server .env contains local development values."
               echo "Offending keys (values redacted):"
-              grep -nE '^(POSTGRES_PASSWORD=qa_local_dev_pw|INGEST_TOKEN=local_dev_token|DATABASE_URL=)' .env \
+              grep -nE '^(POSTGRES_PASSWORD|INGEST_TOKEN)=.*local_dev|^DATABASE_URL=' .env \
                 | sed 's/=.*/=<redacted>/'
               echo ""
               echo "Nothing was changed — the running containers are untouched."
