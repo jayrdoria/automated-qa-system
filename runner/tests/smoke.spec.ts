@@ -19,5 +19,10 @@ test("pipeline smoke: chromium launches and can reach the internet", async ({
   });
 
   expect(response?.ok(), "example.com should return 2xx").toBe(true);
-  await expect(page.locator("h1")).toHaveText("Example Domain");
+  // Title, not <h1>: example.com rewrote its page and removed the heading this
+  // used to assert on, which failed the deploy gate for a reason unrelated to
+  // any deploy. The title survived, and a real TLS page with a real title is
+  // all this gate needs to prove. One request per deploy is well within the
+  // "don't use this for monitoring" notice the page now carries.
+  await expect(page).toHaveTitle(/Example Domain/);
 });

@@ -1,5 +1,6 @@
 import type { Page, Locator } from "@playwright/test";
 import { getConfig } from "./config";
+import { STAKES_GAMES, type GameTarget } from "./games";
 
 /**
  * ─────────────────────────────────────────────────────────────────────────
@@ -49,6 +50,11 @@ export function siteForRegion(region: string): BrandId | undefined {
   return COLUMNS.find((c) => c.region === region)?.site;
 }
 
+/** Position of a region in COLUMNS — offsets the game rotation per column. */
+export function columnIndex(region: string): number {
+  return COLUMNS.findIndex((c) => c.region === region);
+}
+
 export interface BrandConfig {
   id: BrandId;
   label: string;
@@ -58,8 +64,10 @@ export interface BrandConfig {
 
   /** Path to the casino/provider listing page. */
   casinoPath: string;
-  /** Direct URL to the Wanted Dead or a Wild game in real-play mode. */
-  gameUrl: string;
+  /** Games game-load rotates through. See lib/games.ts. */
+  games: GameTarget[];
+  /** Real-play URL for one of this brand's games, on this brand's own host. */
+  gameUrl: (game: GameTarget) => string;
 
   /** Opens the login form. Stakes reveals an inline form; X7 opens a modal. */
   openLogin: (page: Page) => Promise<void>;
@@ -209,7 +217,10 @@ function stakesLike(
     username,
     password,
     casinoPath: "/casino",
-    gameUrl: `${baseUrl}/game/hacksaw/wanted-dead-or-a-wild/real`,
+    // Every Stakes mirror serves the same catalogue under the same paths, so the
+    // URL is always built on THIS brand's host: stakes3 tests stakes3.com/game/…
+    games: STAKES_GAMES,
+    gameUrl: (game) => `${baseUrl}/game/${game.path}/real`,
 
     // getByRole cannot match this button — its accessible name differs from its
     // visible text (verified: getByRole returned 0 matches while the DOM shows
@@ -347,7 +358,16 @@ function x7(): BrandConfig {
     username: c.X7_USERNAME,
     password: c.X7_PASSWORD,
     casinoPath: "/en/casino",
-    gameUrl: `${c.X7_BASE_URL}/en/casino/hacksaw/0z-wanted-dead-or-a-wild/real`,
+    // X7 uses a different catalogue and URL scheme. Single game, no provider-id
+    // assertion — its DOM has never been observed (still Cloudflare-blocked).
+    games: [
+      {
+        id: "wanted-dead-or-a-wild",
+        name: "Wanted Dead or a Wild",
+        path: "0z-wanted-dead-or-a-wild",
+      },
+    ],
+    gameUrl: (game) => `${c.X7_BASE_URL}/en/casino/hacksaw/${game.path}/real`,
 
     loginTrigger: (page) => clickable(page, RE.login),
     // ⚠ UNVERIFIED — X7 opens a login MODAL and is still Cloudflare-challenged.

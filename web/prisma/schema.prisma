@@ -20,6 +20,9 @@ model CheckRun {
   /// Path inside the artifacts volume. Never served publicly unless
   /// PUBLIC_SHOW_SCREENSHOTS is enabled — these contain logged-in account state.
   screenshot String?
+  /// What exactly was exercised when a check covers several things — the game
+  /// game-load rotated to. Null for single-target checks and for older rows.
+  target     String?
   startedAt  DateTime @map("started_at")
   createdAt  DateTime @default(now()) @map("created_at")
 
@@ -38,6 +41,9 @@ model CheckState {
   status         String
   since          DateTime
   lastNotifiedAt DateTime? @map("last_notified_at")
+  /// Consecutive failed runs. A FAILING alert waits for 2, so a single blip
+  /// that passes on the next run never reaches Slack. The canary alerts at 1.
+  failStreak     Int       @default(0) @map("fail_streak")
   updatedAt      DateTime  @updatedAt @map("updated_at")
 
   @@unique([brand, region, checkName])

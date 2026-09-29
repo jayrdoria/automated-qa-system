@@ -25,6 +25,13 @@ const resultSchema = z.object({
   startedAt: z.string().datetime(),
   /// Set when the request never reached the brand (CDN edge block / geo).
   blocked: z.boolean().optional(),
+  /// The game game-load rotated to, or null. Optional so an older runner
+  /// image that does not send it keeps working through a deploy.
+  target: z
+    .string()
+    .regex(/^[a-z0-9-]{1,64}$/, "target must be a lowercase slug")
+    .nullable()
+    .optional(),
 });
 
 const payloadSchema = z.object({
@@ -72,6 +79,7 @@ export async function POST(request: Request) {
         durationMs: r.durationMs,
         error: r.error ?? null,
         screenshot: r.screenshot ?? null,
+        target: r.target ?? null,
         startedAt: new Date(r.startedAt),
       })),
     });

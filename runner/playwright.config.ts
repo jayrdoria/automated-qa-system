@@ -9,6 +9,11 @@ try {
   // running in the container, or no .env yet
 }
 
+// One timestamp for the whole run, inherited by every worker. The game rotation
+// keys off it so a retry — which gets a fresh worker — tests the SAME game as
+// the attempt it is retrying. See lib/games.ts.
+process.env.QA_RUN_STARTED_AT ??= String(Date.now());
+
 /**
  * Batch monitoring config — this is not a CI suite, it's a cron-driven prober.
  *
@@ -40,7 +45,18 @@ export default defineConfig({
   retries: 1,
   forbidOnly: !!process.env.CI,
 
-  timeout: 60_000,
+  /*
+   * The test-level budget must exceed any single step's own timeout, or the
+   * test deadline fires first and the report says only "Test timeout of
+   * 60000ms exceeded" — no step, no cause. That was 47 of the failures in the
+   * first two weeks of production: chat-widget allows 45s to load the page plus
+   * 45s for the widget inside a 60s test, and game-load is longer still.
+   *
+   * Raising this does not make failing runs slow in general. A test stops at its
+   * FIRST failing step, so the worst case is the (fast) successful steps plus
+   * one step timeout — not the sum of every timeout. Passing runs are unchanged.
+   */
+  timeout: 150_000,
   expect: { timeout: 15_000 },
 
   reporter: [

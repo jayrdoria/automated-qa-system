@@ -43,6 +43,35 @@ export const CHECKS = [
 
 export type CheckId = (typeof CHECKS)[number]["id"];
 
+export const CHECK_LABELS: Record<string, string> = Object.fromEntries(
+  CHECKS.map((c) => [c.id, c.label]),
+);
+
+/**
+ * Games game-load rotates through, one per run.
+ *
+ * ⚠ MUST MATCH `STAKES_GAMES` in runner/lib/games.ts (ids and names). The runner
+ * picks the game and reports its id as check_run.target; this list only turns
+ * that id into a name. An unknown id still works — it just displays raw.
+ */
+export const GAMES = [
+  { id: "wanted-dead-or-a-wild", name: "Wanted Dead or a Wild" },
+  { id: "multifly", name: "Multifly" },
+  { id: "ze-zeus", name: "Ze Zeus" },
+] as const;
+
+export function gameName(id: string | null | undefined): string | null {
+  if (!id) return null;
+  return GAMES.find((g) => g.id === id)?.name ?? id;
+}
+
+/**
+ * The check every other check depends on. When it fails, the rest of that run
+ * failing is a consequence, not six more incidents — alerting and the failures
+ * panel collapse them into one.
+ */
+export const CANARY_CHECK = "site-up";
+
 /**
  * One column of the dashboard = one cron run = one (market, domain) pair.
  *

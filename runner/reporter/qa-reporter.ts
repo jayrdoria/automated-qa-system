@@ -7,6 +7,7 @@ import type {
   TestResult,
 } from "@playwright/test/reporter";
 import path from "node:path";
+import fs from "node:fs";
 import { getConfig } from "../lib/config";
 import { BRAND_IDS, siteForRegion, type BrandId } from "../lib/brands";
 
@@ -44,6 +45,13 @@ function currentSite(): BrandId | undefined {
  * computed against a complete picture rather than trickling in.
  */
 
+/**
+ * Written when a whole run was edge-blocked and a retry is available. Lives in
+ * artifacts/, which is bind-mounted, so scripts/run-checks.sh sees it on the
+ * host at ./artifacts/.edge-blocked. MUST match BLOCKED_MARKER there.
+ */
+const BLOCKED_MARKER = path.resolve(__dirname, "../artifacts/.edge-blocked");
+
 interface Payload {
   brand: string;
   region: string;
@@ -54,6 +62,12 @@ interface Payload {
   screenshot: string | null;
   startedAt: string;
   blocked: boolean;
+  /**
+   * What exactly was exercised, when a check covers several things — today the
+   * game game-load rotated to. Null for single-target checks. Sent to a web
+   * build that predates it, it is silently dropped (zod strips unknown keys).
+   */
+  target: string | null;
 }
 
 export default class QaReporter implements Reporter {
@@ -182,6 +196,13 @@ export default class QaReporter implements Reporter {
           : null,
       startedAt: result.startTime.toISOString(),
       blocked,
+      // The spec pushes this before its first assertion, so it is present on
+      // failures too. Read from the RESULT (this attempt), not the test case,
+      // so a retry that rotated to a different game can never mislabel.
+      target:
+        result.annotations.find((a) => a.type === "target")?.description ??
+        testCase.annotations.find((a) => a.type === "target")?.description ??
+        null,
     });
 
     this.completed = this.results.size;
@@ -204,6 +225,30 @@ export default class QaReporter implements Reporter {
 
     const blockedCount = payload.filter((r) => r.blocked).length;
     if (blockedCount === payload.length) {
+      /*
+       * The whole run was refused by Cloudflare — every check failed before
+       * reaching the site. In production that was a flagged VPN exit IP, and a
+       * different exit got through. When scripts/run-checks.sh says a retry is
+       * available, hold these results back and leave a marker instead: it
+       * rotates the tunnel and runs again, and only THAT run is recorded. A run
+       * that never reached the site is not worth a row, a red cell or an email.
+       *
+       * The retry runs with DEFER_IF_BLOCKED unset, so if it is blocked too the
+       * results ARE posted — a real, persistent block is never hidden.
+       */
+      if (process.env.DEFER_IF_BLOCKED === "1") {
+        try {
+          fs.writeFileSync(BLOCKED_MARKER, new Date().toISOString());
+          console.warn(
+            `[qa-reporter] ALL ${blockedCount} checks were blocked at the edge — results held ` +
+              `back, marker written for a retry through a fresh VPN exit`,
+          );
+          return;
+        } catch (e) {
+          // Cannot signal a retry, so fall through and record what we have.
+          console.error(`[qa-reporter] could not write retry marker: ${(e as Error).message}`);
+        }
+      }
       console.warn(
         `[qa-reporter] ALL ${blockedCount} checks hit an edge block. ` +
           `The source IP is almost certainly not whitelisted / outside the ` +

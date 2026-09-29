@@ -27,6 +27,29 @@ const BLOCK_BODY =
   /you have been blocked|unable to access|not available in your (country|region)|geo.?restrict|cloudflare/i;
 
 /**
+ * One retry on a navigation TIMEOUT, and only on a timeout.
+ *
+ * Production history showed page.goto timeouts arriving singly and at random —
+ * the VPN exit having a slow moment — with the next run passing. Retrying the
+ * navigation is far cheaper than Playwright's whole-test retry, which repeats
+ * the login as well. An HTTP error or an edge block is a real answer from the
+ * server and is never retried here.
+ */
+async function gotoWithRetry(
+  page: Page,
+  url: string,
+  timeout: number,
+): Promise<Response | null> {
+  try {
+    return await page.goto(url, { waitUntil: "domcontentloaded", timeout });
+  } catch (e) {
+    if (!(e instanceof Error) || e.name !== "TimeoutError") throw e;
+    console.warn(`[preflight] navigation to ${url} timed out after ${timeout}ms — retrying once`);
+    return await page.goto(url, { waitUntil: "domcontentloaded", timeout });
+  }
+}
+
+/**
  * Navigate and fail fast with a distinct error if we hit an edge block.
  * Returns the response for callers that want it.
  */
@@ -35,7 +58,7 @@ export async function gotoChecked(
   url: string,
   timeout = 45_000,
 ): Promise<Response | null> {
-  const res = await page.goto(url, { waitUntil: "domcontentloaded", timeout });
+  const res = await gotoWithRetry(page, url, timeout);
   const status = res?.status() ?? 0;
 
   if (status === 403 || status === 503 || status === 429) {

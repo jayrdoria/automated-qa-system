@@ -29,22 +29,39 @@ for (const id of BRAND_IDS) {
        * which reads as a broken cashier when the cashier is in fact open and
        * working. This raced: fast logins hit the prompt, slow ones didn't.
        */
-      const alreadyOpen = await modal
-        .isVisible()
-        .catch(() => false);
+      /*
+       * The check above still lost a race in production: 61 of 61 recorded
+       * click timeouts were the cashier's OWN backdrop (.experience-cashier-bg)
+       * intercepting the click. The prompt had not appeared when isVisible()
+       * ran, then opened by itself before the click landed — so a working
+       * cashier failed the check every day, on every domain.
+       *
+       * A click that fails is therefore not a verdict. Whatever happened to the
+       * click, the final assertion below is the only thing that decides the
+       * result, and it passes ONLY if the cashier is actually on screen. A
+       * genuinely broken cashier still fails; it just fails on the right line.
+       */
+      const alreadyOpen = await modal.isVisible().catch(() => false);
 
+      let clickFailure: string | null = null;
       if (!alreadyOpen) {
         const deposit = brand.depositButton(page);
         await expect(
           deposit,
           `${brand.label}: deposit button not found while logged in`,
         ).toBeVisible({ timeout: 30_000 });
-        await deposit.click();
+        try {
+          await deposit.click({ timeout: 10_000 });
+        } catch (e) {
+          clickFailure = (e as Error).message.split("\n")[0] ?? "click failed";
+        }
       }
 
       await expect(
         modal,
-        `${brand.label}: cashier modal did not open`,
+        clickFailure
+          ? `${brand.label}: cashier modal did not open (the Deposit click also failed: ${clickFailure})`
+          : `${brand.label}: cashier modal did not open`,
       ).toBeVisible({ timeout: 30_000 });
     });
   });

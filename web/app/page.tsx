@@ -1,14 +1,30 @@
 import { prisma } from "@/lib/prisma";
 import {
+  BRANDS,
   BRAND_LABELS,
   SITE_DOMAINS,
   CHECKS,
+  CHECK_LABELS,
   COLUMNS,
   DEFERRED_BRANDS,
   RUN_INTERVAL_MIN,
   RUN_GRACE_MIN,
   STALE_AFTER_MIN,
+  gameName,
+  type Brand,
 } from "@/lib/checks";
+import { explainFailure, isBlockedError, VERDICT_LABELS, type Verdict } from "@/lib/failures";
+import { groupRun, consequenceReason } from "@/lib/incidents";
+import {
+  parseRunsFilter,
+  toWhere,
+  filterQuery,
+  isFiltered,
+  RUN_STATUSES,
+  STATUS_FILTER_LABELS,
+  type RunsFilter,
+} from "@/lib/runs-query";
+import { formatLocal } from "@/lib/email";
 import { RunStatus } from "./RunStatus";
 import { AutoRefresh } from "./AutoRefresh";
 import { RunningCell } from "./RunningCell";
@@ -21,42 +37,43 @@ export const dynamic = "force-dynamic";
 /// of the page.
 const STALE_AFTER_MS = STALE_AFTER_MIN * 60 * 1000;
 
+const BASE_PATH = process.env.NEXT_PUBLIC_BASE_PATH ?? "/automated-qa-system";
+
 type Status =
   | "pass"
   | "fail"
+  | "blocked" // Cloudflare refused the VPN exit — the site was never tested
   | "stale"
   | "none"
-  | "deferred"
-  | "running"   // this exact check is executing right now
-  | "queued";   // in this run, not reached yet
+  | "running" // this exact check is executing right now
+  | "queued"; // in this run, not reached yet
 
-function statusOf(lastRun: { status: string; startedAt: Date } | undefined): Status {
-  if (!lastRun) return "none";
-  if (Date.now() - lastRun.startedAt.getTime() > STALE_AFTER_MS) return "stale";
-  return lastRun.status === "pass" ? "pass" : "fail";
+interface LatestRow {
+  status: string;
+  startedAt: Date;
+  durationMs: number;
+  error: string | null;
+  target: string | null;
 }
 
-const STATUS_STYLES: Record<Status, string> = {
-  running: "border-l-sky-500 bg-sky-50/50 dark:bg-sky-950/20",
-  queued: "border-l-neutral-300 dark:border-l-neutral-700",
-  deferred: "border-l-neutral-400 bg-neutral-50/60 dark:bg-neutral-900/40 opacity-70",
-  pass: "border-l-[var(--color-pass)] bg-emerald-50/50 dark:bg-emerald-950/20",
-  fail: "border-l-[var(--color-fail)] bg-red-50/50 dark:bg-red-950/20",
-  stale: "border-l-[var(--color-stale)] bg-amber-50/50 dark:bg-amber-950/20",
-  none: "border-l-neutral-300 dark:border-l-neutral-700",
-};
+function statusOf(lastRun: LatestRow | undefined): Status {
+  if (!lastRun) return "none";
+  if (Date.now() - lastRun.startedAt.getTime() > STALE_AFTER_MS) return "stale";
+  if (lastRun.status === "pass") return "pass";
+  // Stored as "fail" by the runner, but it is evidence about the route, not the
+  // site — shown grey and never counted as failing.
+  return isBlockedError(lastRun.error) ? "blocked" : "fail";
+}
 
 /** Compact cell styling for the matrix — colour carries the signal, the word confirms it. */
 const CELL_STYLES: Record<Status, string> = {
-  running:
-    "bg-sky-500 text-white dark:bg-sky-500 dark:text-white font-medium animate-pulse",
-  queued:
-    "bg-neutral-100 text-neutral-400 dark:bg-neutral-900 dark:text-neutral-600",
+  running: "bg-sky-500 text-white dark:bg-sky-500 dark:text-white font-medium animate-pulse",
+  queued: "bg-neutral-100 text-neutral-400 dark:bg-neutral-900 dark:text-neutral-600",
   pass: "bg-emerald-100 text-emerald-800 dark:bg-emerald-950 dark:text-emerald-300",
   fail: "bg-red-100 text-red-800 dark:bg-red-950 dark:text-red-300",
+  blocked: "bg-slate-200 text-slate-700 dark:bg-slate-800 dark:text-slate-300",
   stale: "bg-amber-100 text-amber-800 dark:bg-amber-950 dark:text-amber-300",
   none: "bg-neutral-100 text-neutral-400 dark:bg-neutral-900 dark:text-neutral-600",
-  deferred: "bg-neutral-100 text-neutral-400 dark:bg-neutral-900 dark:text-neutral-600",
 };
 
 /// Never colour alone — these labels keep the grid readable for colour-blind
@@ -66,20 +83,38 @@ const CELL_LABELS: Record<Status, string> = {
   queued: "Queued",
   pass: "Pass",
   fail: "Fail",
+  blocked: "Blocked",
   stale: "Stale",
   none: "—",
-  deferred: "—",
 };
 
 const STATUS_LABELS: Record<Status, string> = {
   running: "Running now",
   queued: "Waiting in this run",
-  deferred: "Deferred",
   pass: "Passing",
   fail: "Failing",
+  blocked: "Blocked by Cloudflare — the site was not tested",
   stale: "Stale",
   none: "No data",
 };
+
+const VERDICT_STYLES: Record<Verdict, string> = {
+  site: "bg-red-100 text-red-800 dark:bg-red-950 dark:text-red-300",
+  flaky: "bg-amber-100 text-amber-800 dark:bg-amber-950 dark:text-amber-300",
+  network: "bg-sky-100 text-sky-800 dark:bg-sky-950 dark:text-sky-300",
+  blocked: "bg-slate-200 text-slate-700 dark:bg-slate-800 dark:text-slate-300",
+  unknown: "bg-neutral-200 text-neutral-700 dark:bg-neutral-800 dark:text-neutral-300",
+};
+
+function VerdictBadge({ verdict }: { verdict: Verdict }) {
+  return (
+    <span
+      className={`inline-block rounded px-1.5 py-0.5 text-[10px] font-medium ${VERDICT_STYLES[verdict]}`}
+    >
+      {VERDICT_LABELS[verdict]}
+    </span>
+  );
+}
 
 /**
  * Numbered pager with ellipsis. Shows first, last, and a window around the
@@ -100,14 +135,15 @@ function pageNumbers(current: number, total: number): (number | "gap")[] {
 function Pager({
   page,
   totalPages,
-  status,
+  filter,
 }: {
   page: number;
   totalPages: number;
-  status: string | null;
+  filter: RunsFilter;
 }) {
-  const href = (p: number) =>
-    `?page=${p}${status ? `&status=${status}` : ""}`;
+  // Every page link carries the active filters — paging must never silently
+  // widen a filtered view back to "all".
+  const href = (p: number) => filterQuery(filter, { page: p });
   const box =
     "inline-flex h-8 min-w-8 items-center justify-center rounded border px-2 text-xs transition-colors";
   const idle =
@@ -150,49 +186,92 @@ function Pager({
   );
 }
 
-function FilterTabs({ status }: { status: string | null }) {
-  const tabs = [
-    { key: null, label: "All" },
-    { key: "fail", label: "Failures only" },
-    { key: "pass", label: "Passes only" },
-  ] as const;
-  return (
-    <div className="flex gap-1">
-      {tabs.map((t) => {
-        const active = status === t.key;
-        // Always reset to page 1 — page 7 of "all" is rarely page 7 of "failures".
-        const href = t.key ? `?status=${t.key}` : "?";
-        return (
-          <a
-            key={t.label}
-            href={href}
-            className={`rounded px-2 py-1 text-xs transition-colors ${
-              active
-                ? "bg-neutral-900 font-medium text-white dark:bg-neutral-100 dark:text-neutral-900"
-                : "text-neutral-500 hover:bg-neutral-100 dark:hover:bg-neutral-800"
-            }`}
-          >
-            {t.label}
-          </a>
-        );
-      })}
-    </div>
-  );
-}
+const inputCls =
+  "rounded border border-neutral-300 bg-white px-2 py-1 text-xs dark:border-neutral-700 dark:bg-neutral-900";
 
 /**
- * Playwright embeds ANSI colour codes in assertion messages. Rendered raw they
- * appear as [2m[31m noise in the browser and in Slack alerts.
+ * Plain GET form: no client JS, the URL is the state, and a filtered view can be
+ * bookmarked or pasted into Slack. "Download CSV" submits the SAME form to the
+ * export route, so the file always matches the fields as currently set — even
+ * ones edited but not yet applied.
  */
-function cleanError(error: string | null | undefined): string | null {
-  if (!error) return null;
-  return error
-    // eslint-disable-next-line no-control-regex
-    .replace(/\[[0-9;]*m/g, "")
-    .replace(/\[\d+m/g, "")
-    .split("\n")[0]!
-    .trim()
-    .slice(0, 200);
+function RunsFilterForm({ filter }: { filter: RunsFilter }) {
+  const today = new Intl.DateTimeFormat("sv-SE", { timeZone: "Asia/Manila" }).format(new Date());
+  return (
+    <form method="get" className="mb-3 flex flex-wrap items-end gap-2 text-xs">
+      <label className="flex flex-col gap-1 text-neutral-500">
+        From
+        <input type="date" name="from" max={today} defaultValue={filter.from ?? ""} className={inputCls} />
+      </label>
+      <label className="flex flex-col gap-1 text-neutral-500">
+        To
+        <input type="date" name="to" max={today} defaultValue={filter.to ?? ""} className={inputCls} />
+      </label>
+      <label className="flex flex-col gap-1 text-neutral-500">
+        Status
+        <select name="status" defaultValue={filter.status} className={inputCls}>
+          {RUN_STATUSES.map((s) => (
+            <option key={s} value={s}>
+              {STATUS_FILTER_LABELS[s]}
+            </option>
+          ))}
+        </select>
+      </label>
+      <label className="flex flex-col gap-1 text-neutral-500">
+        Domain
+        <select name="domain" defaultValue={filter.domain ?? ""} className={inputCls}>
+          <option value="">All</option>
+          {BRANDS.filter((b) => !DEFERRED_BRANDS.includes(b)).map((b) => (
+            <option key={b} value={b}>
+              {SITE_DOMAINS[b]}
+            </option>
+          ))}
+        </select>
+      </label>
+      <label className="flex flex-col gap-1 text-neutral-500">
+        Region
+        <select name="region" defaultValue={filter.region ?? ""} className={inputCls}>
+          <option value="">All</option>
+          {COLUMNS.map((c) => (
+            <option key={c.region} value={c.region}>
+              {c.region} · {c.label}
+            </option>
+          ))}
+        </select>
+      </label>
+      <label className="flex flex-col gap-1 text-neutral-500">
+        Check
+        <select name="check" defaultValue={filter.check ?? ""} className={inputCls}>
+          <option value="">All</option>
+          {CHECKS.map((c) => (
+            <option key={c.id} value={c.id}>
+              {c.label}
+            </option>
+          ))}
+        </select>
+      </label>
+      <button
+        type="submit"
+        className="rounded bg-neutral-900 px-3 py-1.5 font-medium text-white hover:bg-neutral-700 dark:bg-neutral-100 dark:text-neutral-900 dark:hover:bg-neutral-300"
+      >
+        Apply
+      </button>
+      <a
+        href="?"
+        className="rounded px-3 py-1.5 text-neutral-500 hover:bg-neutral-100 dark:hover:bg-neutral-800"
+      >
+        Reset
+      </a>
+      <button
+        type="submit"
+        formAction={`${BASE_PATH}/api/export`}
+        className="ml-auto rounded border border-neutral-300 px-3 py-1.5 font-medium hover:bg-neutral-100 dark:border-neutral-700 dark:hover:bg-neutral-800"
+        title="Download the runs matching these filters as CSV (dates are +08:00)"
+      >
+        Download CSV
+      </button>
+    </form>
+  );
 }
 
 function timeAgo(date: Date): string {
@@ -209,17 +288,23 @@ const PAGE_SIZE = 25;
 export default async function DashboardPage({
   searchParams,
 }: {
-  searchParams: Promise<{ page?: string; status?: string }>;
+  searchParams: Promise<Record<string, string | string[] | undefined>>;
 }) {
   const sp = await searchParams;
-  const pageParam = Number(sp.page ?? "1");
+  const pageRaw = Array.isArray(sp.page) ? sp.page[0] : sp.page;
+  const pageParam = Number(pageRaw ?? "1");
   const page = Number.isFinite(pageParam) && pageParam > 0 ? Math.floor(pageParam) : 1;
-  const statusFilter = sp.status === "fail" || sp.status === "pass" ? sp.status : null;
-  const where = statusFilter ? { status: statusFilter } : {};
 
-  const [latestRuns, recentRuns, totalRuns, progressRows, medianRows] =
-    await Promise.all([
-    // Postgres DISTINCT ON — one row per brand/check, the newest.
+  // An invalid filter falls back to "everything" with a visible notice, rather
+  // than a 500 or a silently different result set.
+  const parsedFilter = parseRunsFilter(sp);
+  const filter = parsedFilter.filter;
+  const where = toWhere(filter);
+
+  const [latestRuns, recentRuns, totalRuns, progressRows, medianRows] = await Promise.all([
+    // Postgres DISTINCT ON — the newest row per brand/region/check, and per GAME
+    // for game-load, so a broken game is not hidden behind a passing one that
+    // happened to run more recently.
     prisma.$queryRaw<
       {
         brand: string;
@@ -229,12 +314,13 @@ export default async function DashboardPage({
         started_at: Date;
         duration_ms: number;
         error: string | null;
+        target: string | null;
       }[]
     >`
-      SELECT DISTINCT ON (brand, region, check_name)
-        brand, region, check_name, status, started_at, duration_ms, error
+      SELECT DISTINCT ON (brand, region, check_name, COALESCE(target, ''))
+        brand, region, check_name, status, started_at, duration_ms, error, target
       FROM check_run
-      ORDER BY brand, region, check_name, started_at DESC
+      ORDER BY brand, region, check_name, COALESCE(target, ''), started_at DESC
     `,
     prisma.checkRun.findMany({
       where,
@@ -256,13 +342,8 @@ export default async function DashboardPage({
     `,
   ]);
 
-  const medianByCheck = new Map(
-    medianRows.map((m) => [m.check_name, Number(m.median_ms)]),
-  );
+  const medianByCheck = new Map(medianRows.map((m) => [m.check_name, Number(m.median_ms)]));
 
-  // A run is "live" only if it is unfinished AND recent. Without the staleness
-  // guard, a runner killed mid-run would leave the dashboard claiming a run is
-  // in progress forever.
   // Completion times for every region, live or not — the countdown measures
   // from the end of the last run, matching scripts/run-checks.sh.
   const lastFinishedByRegion = new Map(
@@ -270,6 +351,44 @@ export default async function DashboardPage({
       .filter((p) => p.finishedAt !== null)
       .map((p) => [p.region, p.finishedAt!.toISOString()]),
   );
+
+  // All latest rows for a cell. Several for game-load (one per game).
+  const rowsByKey = new Map<string, LatestRow[]>();
+  for (const r of latestRuns) {
+    const k = `${r.brand}:${r.region}:${r.check_name}`;
+    rowsByKey.set(k, [
+      ...(rowsByKey.get(k) ?? []),
+      {
+        status: r.status,
+        startedAt: r.started_at,
+        durationMs: r.duration_ms,
+        error: r.error,
+        target: r.target,
+      },
+    ]);
+  }
+
+  /**
+   * The row a cell represents. For single-target checks, the only row. For
+   * game-load, the WORST current game: a cell is red while any game's latest
+   * result is a real failure, even if the rotation has since passed a different
+   * game. Otherwise a broken Multifly would flash red for one run an hour and
+   * look green the rest of the time.
+   */
+  function cellRow(key: string): { row: LatestRow | undefined; games: LatestRow[] } {
+    const rows = rowsByKey.get(key) ?? [];
+    const targeted = rows.filter((r) => r.target);
+    if (targeted.length === 0) {
+      const row = rows.slice().sort((a, b) => b.startedAt.getTime() - a.startedAt.getTime())[0];
+      return { row, games: [] };
+    }
+    // Pre-rotation rows (target NULL) are superseded once any game has reported.
+    const fresh = targeted.filter((r) => statusOf(r) !== "stale");
+    const pool = fresh.length ? fresh : targeted;
+    const newestFirst = pool.slice().sort((a, b) => b.startedAt.getTime() - a.startedAt.getTime());
+    const row = newestFirst.find((r) => statusOf(r) === "fail") ?? newestFirst[0];
+    return { row, games: targeted };
+  }
 
   /*
    * A run counts as live only if all three hold:
@@ -279,23 +398,16 @@ export default async function DashboardPage({
    *
    * That last one is the self-heal. The "done" ping is fire-and-forget, so a
    * dropped packet used to leave the header frozen at "3/7 running" while the
-   * end-of-run batch wrote all seven results underneath — a header contradicting
-   * its own rows. If every check has a fresh result, the run is over whatever
-   * the ping said.
-   */
-  /*
-   * Takes the brand explicitly. It used to hardcode `x.brand === "stakes"`,
-   * which meant that once FR and IT moved to stakes3 no result ever matched,
-   * the run never looked complete, and those headers stayed pinned at
-   * "n/7 running" forever.
+   * end-of-run batch wrote all seven results underneath. If every check has a
+   * fresh result, the run is over whatever the ping said.
+   *
+   * `some`, not `find`: game-load has one latest row per game, and only the
+   * game tested in THIS run is new — the others are from earlier rotations.
    */
   const fullResultsSince = (brand: string, region: string, since: Date) =>
-    CHECKS.every((c) => {
-      const r = latestRuns.find(
-        (x) => x.region === region && x.check_name === c.id && x.brand === brand,
-      );
-      return r !== undefined && r.started_at >= since;
-    });
+    CHECKS.every((c) =>
+      (rowsByKey.get(`${brand}:${region}:${c.id}`) ?? []).some((r) => r.startedAt >= since),
+    );
 
   const progressByRegion = new Map(
     progressRows
@@ -320,18 +432,6 @@ export default async function DashboardPage({
 
   const totalPages = Math.max(1, Math.ceil(totalRuns / PAGE_SIZE));
 
-  const byKey = new Map(
-    latestRuns.map((r) => [
-      `${r.brand}:${r.region}:${r.check_name}`,
-      {
-        status: r.status,
-        startedAt: r.started_at,
-        durationMs: r.duration_ms,
-        error: r.error,
-      },
-    ]),
-  );
-
   // Most recent result per region — feeds the live schedule indicator so it can
   // tell "a tick passed and nothing arrived" (running, or late) from "we have
   // fresh data" (idle, counting down).
@@ -349,273 +449,283 @@ export default async function DashboardPage({
   // that has silently stopped reporting.
   const shownColumns = COLUMNS;
 
-  // Surfaced above the matrix so a failure is readable at a glance — the grid
-  // says WHICH cell is red, this says WHY, without a click.
-  const currentFailures = shownColumns.flatMap((col) =>
-    CHECKS.flatMap((c) => {
-      const last = byKey.get(`${col.site}:${col.region}:${c.id}`);
-      // A column mid-run has no current verdict — excluded so the failures
-      // panel doesn't flash last cycle's errors while they are being retested.
-      if (progressByRegion.has(col.region)) return [];
-      if (statusOf(last) !== "fail") return [];
-      return [
-        {
-          key: `${col.site}:${col.region}:${c.id}`,
-          brand: BRAND_LABELS[col.site],
-          region: col.region,
-          check: c.label,
-          error: cleanError(last?.error),
-        },
-      ];
-    }),
-  );
+  /*
+   * Surfaced above the matrix so a failure is readable at a glance — the grid
+   * says WHICH cell is red, this says WHY, without a click.
+   *
+   * Grouped into incidents with the same rules as the alert emails: when the
+   * site or its login is broken, the checks below it fail too, and listing
+   * each as its own failure made one outage read like five.
+   */
+  const incidents = shownColumns.flatMap((col) => {
+    // A column mid-run has no current verdict — excluded so the panel doesn't
+    // flash last cycle's errors while they are being retested.
+    if (progressByRegion.has(col.region)) return [];
+    const items = CHECKS.map((c) => {
+      const { row } = cellRow(`${col.site}:${col.region}:${c.id}`);
+      return { checkName: c.id, failed: statusOf(row) === "fail", row };
+    });
+    const grouped = groupRun(items);
+    return grouped.incidents.map(({ root, consequences }) => ({
+      key: `${col.site}:${col.region}:${root.checkName}`,
+      domain: SITE_DOMAINS[col.site],
+      region: col.region,
+      market: col.label,
+      check:
+        (CHECK_LABELS[root.checkName] ?? root.checkName) +
+        (root.row?.target ? ` — ${gameName(root.row.target)}` : ""),
+      explanation: explainFailure(root.row?.error),
+      since: root.row?.startedAt,
+      consequences: consequences.map((c) => CHECK_LABELS[c.checkName] ?? c.checkName),
+      reason: consequenceReason(root.checkName, grouped.allFailed),
+      allFailed: grouped.allFailed,
+    }));
+  });
 
-  const failing = shownColumns
+  const blockedCells = shownColumns
     .filter((col) => !progressByRegion.has(col.region))
-    .flatMap((col) =>
-      CHECKS.map((c) =>
-        statusOf(byKey.get(`${col.site}:${col.region}:${c.id}`)),
-      ),
-    )
-    .filter((s) => s === "fail").length;
+    .flatMap((col) => CHECKS.map((c) => statusOf(cellRow(`${col.site}:${col.region}:${c.id}`).row)))
+    .filter((s) => s === "blocked").length;
 
   return (
     <main className="mx-auto max-w-6xl px-6 py-10">
       <AutoRefresh live={progressByRegion.size > 0} />
       <header className="mb-8 flex flex-wrap items-baseline justify-between gap-4">
         <div>
-          <h1 className="text-2xl font-semibold tracking-tight">
-            Automated QA Monitor
-          </h1>
+          <h1 className="text-2xl font-semibold tracking-tight">Automated QA Monitor</h1>
           <p className="mt-1 text-sm text-neutral-500 dark:text-neutral-400">
-            {shownColumns.map((c) => c.region).join(" · ")} · each column checked
-            every {RUN_INTERVAL_MIN} minutes
+            {shownColumns.map((c) => c.region).join(" · ")} · each column checked every{" "}
+            {RUN_INTERVAL_MIN} minutes
           </p>
         </div>
-        <span
-          className={`rounded-full px-3 py-1 text-sm font-medium ${
-            failing > 0
-              ? "bg-red-100 text-red-800 dark:bg-red-950 dark:text-red-200"
-              : "bg-emerald-100 text-emerald-800 dark:bg-emerald-950 dark:text-emerald-200"
-          }`}
-        >
-          {failing > 0 ? `${failing} failing` : "All green"}
-        </span>
+        <div className="flex flex-wrap items-center gap-2">
+          {blockedCells > 0 && (
+            <span
+              className="rounded-full bg-slate-200 px-3 py-1 text-sm font-medium text-slate-700 dark:bg-slate-800 dark:text-slate-300"
+              title="Cloudflare refused the VPN exit, so these checks never reached the site. Not counted as failures."
+            >
+              {blockedCells} blocked
+            </span>
+          )}
+          <span
+            className={`rounded-full px-3 py-1 text-sm font-medium ${
+              incidents.length > 0
+                ? "bg-red-100 text-red-800 dark:bg-red-950 dark:text-red-200"
+                : "bg-emerald-100 text-emerald-800 dark:bg-emerald-950 dark:text-emerald-200"
+            }`}
+          >
+            {incidents.length > 0
+              ? `${incidents.length} ${incidents.length === 1 ? "incident" : "incidents"}`
+              : "All green"}
+          </span>
+        </div>
       </header>
 
-      {currentFailures.length > 0 && (
+      {incidents.length > 0 && (
         <section className="mb-8 rounded-lg border border-red-200 bg-red-50/50 p-4 dark:border-red-900 dark:bg-red-950/20">
           <h2 className="mb-3 text-sm font-semibold uppercase tracking-wide text-red-800 dark:text-red-300">
             Current failures
           </h2>
-          <ul className="space-y-2">
-            {currentFailures.map((f) => (
+          <ul className="space-y-3">
+            {incidents.map((f) => (
               <li key={f.key} className="text-sm">
-                <span className="font-medium">
-                  {f.brand} · {f.region} · {f.check}
-                </span>
-                <p className="mt-0.5 break-words font-mono text-xs text-neutral-600 dark:text-neutral-400">
-                  {f.error ?? "(no error captured)"}
+                <div className="flex flex-wrap items-center gap-2">
+                  <span className="font-medium">
+                    {f.allFailed
+                      ? `${f.domain} · ${f.region} — down or in maintenance`
+                      : `${f.domain} · ${f.region} · ${f.check}`}
+                  </span>
+                  <VerdictBadge verdict={f.explanation.verdict} />
+                  {f.since && (
+                    <span className="text-xs text-neutral-500" title={formatLocal(f.since)}>
+                      {timeAgo(f.since)}
+                    </span>
+                  )}
+                </div>
+                <p className="mt-0.5 text-neutral-800 dark:text-neutral-200">
+                  {f.explanation.headline}
                 </p>
+                <p className="text-xs text-neutral-600 dark:text-neutral-400">
+                  {f.explanation.detail}
+                </p>
+                {f.consequences.length > 0 && (
+                  <p className="mt-1 text-xs text-neutral-600 dark:text-neutral-400">
+                    {f.reason}: {f.consequences.join(", ")} also failed.
+                  </p>
+                )}
               </li>
             ))}
           </ul>
         </section>
       )}
 
-          <section className="mb-10">
-            {/* One matrix for everything. Each column is a (market, domain)
-                pair, because a market is served by exactly one mirror — so
-                the domain belongs in the header, not in a separate table per
-                brand. Splitting by brand would put FR and DE in different
-                blocks and hide the one cell that differs. */}
-            <div className="overflow-x-auto rounded-lg border border-neutral-200 dark:border-neutral-800">
-              <table className="w-full border-collapse text-sm">
-                <thead>
-                  <tr className="bg-neutral-50 dark:bg-neutral-900">
-                    <th className="px-4 py-2 text-left font-medium">Check</th>
-                    {shownColumns.map((col) => (
-                      <th
-                        key={col.region}
-                        className="px-3 py-2 text-center font-medium"
-                        title={`${col.label} · ${SITE_DOMAINS[col.site]}`}
-                      >
-                        <div className="flex flex-col items-center leading-tight">
-                          <span>{col.region}</span>
-                          {/* The whole point of the mirror split: without this
-                              you cannot tell which host a green cell refers to. */}
-                          <span className="text-[10px] font-normal text-neutral-400 dark:text-neutral-500">
-                            {SITE_DOMAINS[col.site]}
-                          </span>
-                          {(() => {
-                            const live = progressByRegion.get(col.region);
-                            if (!live) {
-                              return (
-                                <RunStatus
-                                  cronOffset={col.cronOffset}
-                                  lastFinishedIso={
-                                    lastFinishedByRegion.get(col.region) ?? null
-                                  }
-                                  lastRunIso={
-                                    lastRunByRegion.get(col.region) ?? null
-                                  }
-                                />
-                              );
-                            }
-                            const pct = Math.round(
-                              (live.completed / live.total) * 100,
-                            );
-                            return (
-                              <span className="flex flex-col items-center gap-0.5">
-                                <span className="text-[11px] font-medium tabular-nums text-sky-600 dark:text-sky-400">
-                                  {live.completed}/{live.total} · {pct}%
-                                </span>
-                                <span className="h-1 w-12 overflow-hidden rounded-full bg-neutral-200 dark:bg-neutral-800">
-                                  <span
-                                    className="block h-full rounded-full bg-sky-500 transition-all"
-                                    style={{ width: `${pct}%` }}
-                                  />
-                                </span>
-                              </span>
-                            );
-                          })()}
-                        </div>
-                      </th>
-                    ))}
-                  </tr>
-                </thead>
-                <tbody>
-                  {CHECKS.map((check) => (
-                    <tr
-                      key={check.id}
-                      className="border-t border-neutral-200 dark:border-neutral-800"
-                    >
-                      <td className="px-4 py-2 font-medium">{check.label}</td>
-                      {shownColumns.map((region) => {
-                        const last = byKey.get(
-                          `${region.site}:${region.region}:${check.id}`,
-                        );
-                        const live = progressByRegion.get(region.region);
-                        /*
-                         * While a region is mid-run, any result older than that
-                         * run's start is last cycle's answer. Showing it as a
-                         * confident green is the lie worth avoiding: the point
-                         * of re-checking is that the old result is no longer
-                         * evidence. Checks already re-run this cycle show their
-                         * fresh result immediately.
-                         */
-                        /*
-                         * Three states during a live run, so the grid reads as
-                         * a queue draining rather than one aggregate number:
-                         *   running — this check is executing now
-                         *   queued  — in this run, not reached yet
-                         *   pass/fail — already re-run this cycle, fresh result
-                         *
-                         * A result older than the run start is last cycle's
-                         * answer; showing it as confident green is the lie
-                         * worth avoiding, since re-checking means it is no
-                         * longer evidence.
-                         */
-                        /*
-                         * Row lifecycle during a live run, resolved in order:
-                         *   1. this check is executing      -> running
-                         *   2. it finished in THIS run      -> pass/fail now
-                         *   3. it is in this run, not reached -> queued
-                         *   4. no run in flight             -> last known result
-                         *
-                         * Step 2 is why progress carries per-check outcomes.
-                         * check_run is only written as one batch at the end, so
-                         * without it a finished check has nowhere to report from
-                         * and would sit on "Queued" until the whole column
-                         * flipped to Pass at once.
-                         */
-                        const liveResult = live?.results?.[check.id];
-                        const notYetRerun =
-                          live !== undefined &&
-                          (!last || last.startedAt < live.startedAt);
-                        // No "deferred" branch here: every column in COLUMNS is
-                        // actively monitored. X7 is the only deferred brand and
-                        // it has no column — it renders in its own section below.
-                        const status: Status =
-                          live && live.currentCheck === check.id
-                            ? "running"
-                            : liveResult
-                              ? liveResult
-                              : notYetRerun
-                                ? "queued"
-                                : statusOf(last);
+      <section className="mb-10">
+        {/* One matrix for everything. Each column is a (market, domain) pair,
+            because a market is served by exactly one mirror — so the domain
+            belongs in the header, not in a separate table per brand. */}
+        <div className="overflow-x-auto rounded-lg border border-neutral-200 dark:border-neutral-800">
+          <table className="w-full border-collapse text-sm">
+            <thead>
+              <tr className="bg-neutral-50 dark:bg-neutral-900">
+                <th className="px-4 py-2 text-left font-medium">Check</th>
+                {shownColumns.map((col) => (
+                  <th
+                    key={col.region}
+                    className="px-3 py-2 text-center font-medium"
+                    title={`${col.label} · ${SITE_DOMAINS[col.site]}`}
+                  >
+                    <div className="flex flex-col items-center leading-tight">
+                      <span>{col.region}</span>
+                      {/* Without this you cannot tell which host a green cell refers to. */}
+                      <span className="text-[10px] font-normal text-neutral-400 dark:text-neutral-500">
+                        {SITE_DOMAINS[col.site]}
+                      </span>
+                      {(() => {
+                        const live = progressByRegion.get(col.region);
+                        if (!live) {
+                          return (
+                            <RunStatus
+                              cronOffset={col.cronOffset}
+                              lastFinishedIso={lastFinishedByRegion.get(col.region) ?? null}
+                              lastRunIso={lastRunByRegion.get(col.region) ?? null}
+                            />
+                          );
+                        }
+                        const pct = Math.round((live.completed / live.total) * 100);
                         return (
-                          <td
-                            key={region.region}
-                            className="px-3 py-2 text-center"
-                          >
-                            <span
-                              title={
-                                last
-                                  ? [
-                                      `${STATUS_LABELS[status]} · ${timeAgo(last.startedAt)} · ${(last.durationMs / 1000).toFixed(1)}s`,
-                                      cleanError(last.error),
-                                    ]
-                                      .filter(Boolean)
-                                      .join("\n")
-                                  : STATUS_LABELS[status]
-                              }
-                              className={`inline-flex min-w-[64px] items-center justify-center rounded px-2 py-1 text-xs font-medium ${CELL_STYLES[status]}`}
-                            >
-                              {status === "running" ? (
-                                <RunningCell
-                                  startedAtIso={
-                                    live?.currentStartedAt?.toISOString() ?? null
-                                  }
-                                  medianMs={medianByCheck.get(check.id) ?? null}
-                                />
-                              ) : (
-                                CELL_LABELS[status]
-                              )}
+                          <span className="flex flex-col items-center gap-0.5">
+                            <span className="text-[11px] font-medium tabular-nums text-sky-600 dark:text-sky-400">
+                              {live.completed}/{live.total} · {pct}%
                             </span>
-                          </td>
+                            <span className="h-1 w-12 overflow-hidden rounded-full bg-neutral-200 dark:bg-neutral-800">
+                              <span
+                                className="block h-full rounded-full bg-sky-500 transition-all"
+                                style={{ width: `${pct}%` }}
+                              />
+                            </span>
+                          </span>
                         );
-                      })}
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
-          </section>
+                      })()}
+                    </div>
+                  </th>
+                ))}
+              </tr>
+            </thead>
+            <tbody>
+              {CHECKS.map((check) => (
+                <tr key={check.id} className="border-t border-neutral-200 dark:border-neutral-800">
+                  <td className="px-4 py-2 font-medium">{check.label}</td>
+                  {shownColumns.map((col) => {
+                    const { row: last, games } = cellRow(`${col.site}:${col.region}:${check.id}`);
+                    const live = progressByRegion.get(col.region);
+                    /*
+                     * Row lifecycle during a live run, resolved in order:
+                     *   1. this check is executing        -> running
+                     *   2. it finished in THIS run        -> pass/fail now
+                     *   3. it is in this run, not reached -> queued
+                     *   4. no run in flight               -> last known result
+                     *
+                     * A result older than the run start is last cycle's answer;
+                     * showing it as confident green is the lie worth avoiding.
+                     * Step 2 is why progress carries per-check outcomes: check_run
+                     * is written as one batch at the end.
+                     */
+                    const liveResult = live?.results?.[check.id];
+                    const notYetRerun =
+                      live !== undefined && (!last || last.startedAt < live.startedAt);
+                    const status: Status =
+                      live && live.currentCheck === check.id
+                        ? "running"
+                        : liveResult
+                          ? liveResult
+                          : notYetRerun
+                            ? "queued"
+                            : statusOf(last);
 
-          {/* X7 has no column — it is a different operator, still behind a
-              Cloudflare interactive challenge that a VPN cannot clear. Shown
-              as deferred rather than omitted, so "not monitored" never reads
-              as "monitored and healthy". */}
-          {DEFERRED_BRANDS.map((brand) => (
-            <section key={brand} className="mb-10">
-              <h2 className="mb-3 flex items-center gap-2 text-sm font-semibold uppercase tracking-wide text-neutral-500 dark:text-neutral-400">
-                {BRAND_LABELS[brand as keyof typeof BRAND_LABELS] ?? brand}
-                <span className="rounded bg-neutral-200 px-2 py-0.5 text-[11px] font-medium normal-case tracking-normal text-neutral-600 dark:bg-neutral-800 dark:text-neutral-400">
-                  deferred — Cloudflare challenge
-                </span>
-              </h2>
-              <div className="rounded-lg border border-dashed border-neutral-300 p-4 text-sm text-neutral-500 dark:border-neutral-700">
-                Not monitored. No market routes to this brand, so it has no
-                column in the grid above.
-              </div>
-            </section>
-          ))}
+                    const tooltip = last
+                      ? [
+                          `${STATUS_LABELS[status]} · ${timeAgo(last.startedAt)} · ${(last.durationMs / 1000).toFixed(1)}s`,
+                          ...(games.length > 0
+                            ? games
+                                .slice()
+                                .sort((a, b) => (gameName(a.target) ?? "").localeCompare(gameName(b.target) ?? ""))
+                                .map(
+                                  (g) =>
+                                    `${gameName(g.target)}: ${CELL_LABELS[statusOf(g)]} (${timeAgo(g.startedAt)})`,
+                                )
+                            : []),
+                          status === "fail" || status === "blocked"
+                            ? explainFailure(last.error).headline
+                            : null,
+                        ]
+                          .filter(Boolean)
+                          .join("\n")
+                      : STATUS_LABELS[status];
+
+                    return (
+                      <td key={col.region} className="px-3 py-2 text-center">
+                        <span
+                          title={tooltip}
+                          className={`inline-flex min-w-[64px] items-center justify-center rounded px-2 py-1 text-xs font-medium ${CELL_STYLES[status]}`}
+                        >
+                          {status === "running" ? (
+                            <RunningCell
+                              startedAtIso={live?.currentStartedAt?.toISOString() ?? null}
+                              medianMs={medianByCheck.get(check.id) ?? null}
+                            />
+                          ) : (
+                            CELL_LABELS[status]
+                          )}
+                        </span>
+                      </td>
+                    );
+                  })}
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      </section>
+
+      {/* X7 has no column — it is a different operator, still behind a
+          Cloudflare interactive challenge that a VPN cannot clear. Shown as
+          deferred rather than omitted, so "not monitored" never reads as
+          "monitored and healthy". */}
+      {DEFERRED_BRANDS.map((brand) => (
+        <section key={brand} className="mb-10">
+          <h2 className="mb-3 flex items-center gap-2 text-sm font-semibold uppercase tracking-wide text-neutral-500 dark:text-neutral-400">
+            {BRAND_LABELS[brand as Brand] ?? brand}
+            <span className="rounded bg-neutral-200 px-2 py-0.5 text-[11px] font-medium normal-case tracking-normal text-neutral-600 dark:bg-neutral-800 dark:text-neutral-400">
+              deferred — Cloudflare challenge
+            </span>
+          </h2>
+          <div className="rounded-lg border border-dashed border-neutral-300 p-4 text-sm text-neutral-500 dark:border-neutral-700">
+            Not monitored. No market routes to this brand, so it has no column in the grid above.
+          </div>
+        </section>
+      ))}
 
       <section>
-        <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
-        <h2 className="text-sm font-semibold uppercase tracking-wide text-neutral-500 dark:text-neutral-400">
+        <h2 className="mb-3 text-sm font-semibold uppercase tracking-wide text-neutral-500 dark:text-neutral-400">
           Recent runs
           <span className="ml-2 font-normal normal-case tracking-normal text-neutral-400">
-            {totalRuns.toLocaleString()} {statusFilter ? statusFilter : "total"}
+            {totalRuns.toLocaleString()} {isFiltered(filter) ? "matching" : "total"}
           </span>
         </h2>
-        <FilterTabs status={statusFilter} />
-        </div>
+
+        <RunsFilterForm filter={filter} />
+
+        {!parsedFilter.ok && (
+          <p className="mb-3 rounded border border-amber-300 bg-amber-50 px-3 py-2 text-xs text-amber-800 dark:border-amber-800 dark:bg-amber-950/30 dark:text-amber-300">
+            Filter ignored — {parsedFilter.error}. Showing all runs.
+          </p>
+        )}
+
         {recentRuns.length === 0 ? (
           <p className="rounded-lg border border-dashed border-neutral-300 p-8 text-center text-sm text-neutral-500 dark:border-neutral-700">
-            No check results yet. The dashboard populates once the cron runner
-            posts its first results.
+            {isFiltered(filter)
+              ? "No runs match these filters."
+              : "No check results yet. The dashboard populates once the cron runner posts its first results."}
           </p>
         ) : (
           <div className="overflow-x-auto rounded-lg border border-neutral-200 dark:border-neutral-800">
@@ -628,54 +738,87 @@ export default async function DashboardPage({
                   <th className="px-4 py-2 font-medium">Check</th>
                   <th className="px-4 py-2 font-medium">Status</th>
                   <th className="px-4 py-2 font-medium">Took</th>
-                  <th className="px-4 py-2 font-medium">Error</th>
+                  <th className="px-4 py-2 font-medium">What happened</th>
                 </tr>
               </thead>
               <tbody>
-                {recentRuns.map((run) => (
-                  <tr
-                    key={run.id}
-                    className="border-t border-neutral-200 dark:border-neutral-800"
-                  >
-                    <td className="whitespace-nowrap px-4 py-2 text-neutral-500">
-                      {timeAgo(run.startedAt)}
-                    </td>
-                    {/* The host, not the brand id — after the mirror split a
-                        bare "stakes3" tells you less than "stakes3.com", and
-                        historical rows may carry a brand no longer in COLUMNS. */}
-                    <td className="px-4 py-2">
-                      {SITE_DOMAINS[run.brand as keyof typeof SITE_DOMAINS] ??
-                        run.brand}
-                    </td>
-                    <td className="px-4 py-2 text-neutral-500">{run.region}</td>
-                    <td className="px-4 py-2">{run.checkName}</td>
-                    <td className="px-4 py-2">
-                      <span
-                        className={
-                          run.status === "pass"
-                            ? "text-emerald-600 dark:text-emerald-400"
-                            : "text-red-600 dark:text-red-400"
-                        }
+                {recentRuns.map((run) => {
+                  const blocked = run.status === "fail" && isBlockedError(run.error);
+                  const x = run.status === "fail" ? explainFailure(run.error) : null;
+                  return (
+                    <tr
+                      key={run.id}
+                      className="border-t border-neutral-200 align-top dark:border-neutral-800"
+                    >
+                      <td
+                        className="whitespace-nowrap px-4 py-2 text-neutral-500"
+                        title={formatLocal(run.startedAt)}
                       >
-                        {run.status}
-                      </span>
-                    </td>
-                    <td className="whitespace-nowrap px-4 py-2 text-neutral-500">
-                      {(run.durationMs / 1000).toFixed(1)}s
-                    </td>
-                    <td className="max-w-md truncate px-4 py-2 text-neutral-500">
-                      {run.error ?? "—"}
-                    </td>
-                  </tr>
-                ))}
+                        {timeAgo(run.startedAt)}
+                      </td>
+                      {/* The host, not the brand id — and historical rows may
+                          carry a brand no longer in COLUMNS. */}
+                      <td className="px-4 py-2">
+                        {SITE_DOMAINS[run.brand as Brand] ?? run.brand}
+                      </td>
+                      <td className="px-4 py-2 text-neutral-500">{run.region}</td>
+                      <td className="px-4 py-2">
+                        {CHECK_LABELS[run.checkName] ?? run.checkName}
+                        {run.target && (
+                          <span className="block text-xs text-neutral-500">
+                            {gameName(run.target)}
+                          </span>
+                        )}
+                      </td>
+                      <td className="px-4 py-2">
+                        <span
+                          className={
+                            run.status === "pass"
+                              ? "text-emerald-600 dark:text-emerald-400"
+                              : blocked
+                                ? "text-slate-500"
+                                : "text-red-600 dark:text-red-400"
+                          }
+                        >
+                          {blocked ? "blocked" : run.status}
+                        </span>
+                      </td>
+                      <td className="whitespace-nowrap px-4 py-2 text-neutral-500">
+                        {(run.durationMs / 1000).toFixed(1)}s
+                      </td>
+                      <td className="max-w-md px-4 py-2 text-neutral-600 dark:text-neutral-400">
+                        {x ? (
+                          // Readable first; the raw Playwright log is one click
+                          // away for whoever is actually debugging.
+                          <details>
+                            <summary className="cursor-pointer">
+                              <span className="text-neutral-800 dark:text-neutral-200">
+                                {x.headline}
+                              </span>
+                            </summary>
+                            <div className="mt-1 space-y-1.5">
+                              <p className="text-xs">{x.detail}</p>
+                              <VerdictBadge verdict={x.verdict} />
+                              {x.technical && (
+                                <pre className="max-h-48 overflow-auto whitespace-pre-wrap break-words rounded bg-neutral-100 p-2 font-mono text-[11px] text-neutral-600 dark:bg-neutral-900 dark:text-neutral-400">
+                                  {x.technical}
+                                </pre>
+                              )}
+                            </div>
+                          </details>
+                        ) : (
+                          "—"
+                        )}
+                      </td>
+                    </tr>
+                  );
+                })}
               </tbody>
             </table>
           </div>
         )}
 
-        {totalPages > 1 && (
-          <Pager page={page} totalPages={totalPages} status={statusFilter} />
-        )}
+        {totalPages > 1 && <Pager page={page} totalPages={totalPages} filter={filter} />}
       </section>
     </main>
   );

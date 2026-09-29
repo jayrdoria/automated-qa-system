@@ -86,6 +86,51 @@ docker inspect automated-qa-system-web-1 \
 
 ---
 
+## How alerts decide what to send
+
+| Situation | Email |
+|---|---|
+| A check fails once, passes next run | **Nothing** — a blip. Each run already retries once. |
+| A check fails **2 runs in a row** (~20 min) | 🔴 FAILING |
+| `site-up` fails | 🔴 SITE DOWN — **immediately** |
+| **Every** check fails (even if the homepage loads) | 🔴 SITE DOWN "down or in maintenance" — **immediately** |
+| Login fails and takes game-load / cashier with it | **One** FAILING for Login, listing the others |
+| Still failing | 🟠 STILL FAILING every `ALERT_RENOTIFY_HOURS` |
+| Fixed, after an alert was sent | ✅ RECOVERED (silent if it was never announced) |
+| Whole run refused by Cloudflare | Retried once through a new VPN exit; ⛔ BLOCKED only if that is refused too |
+
+game-load alerts **per game**, so one broken game cannot flap as the rotation
+moves on. The dependency chain lives in `web/lib/incidents.ts`.
+
+**Local dev never sends real email.** The Prisma client auto-loads the root
+`.env`, which holds the real SMTP credentials, so a local `next dev` has them.
+`sendAlert` refuses to send unless `NODE_ENV=production` (set by the web image)
+and logs `suppressed alert: …` instead. `ALERT_SEND_IN_DEV=1` overrides this
+for a deliberate test — mark such sends `[TEST]`.
+
+## Game rotation
+
+game-load tests one game per run — Wanted Dead or a Wild, Multifly, Ze Zeus —
+each on the column's own domain. Every column covers all three every hour, and
+columns test different games at the same moment. The check proves the RIGHT
+game loaded via the provider's game id in the frame URL.
+
+To add a game: add it to `STAKES_GAMES` in `runner/lib/games.ts` **and** `GAMES`
+in `web/lib/checks.ts`, with its `providerGameId` read from the frame URL
+(`…?gameid=NNNN`). Pin one for debugging:
+
+```bash
+GAME_OVERRIDE=multifly CHECK_REGION=BD npx playwright test tests/checks/3-game-load.spec.ts
+```
+
+## Export
+
+Recent runs → set dates/filters → **Download CSV**. Dates are +08:00 calendar
+days, capped at 93 days (retention keeps ~2 months). Same filters as the table.
+Rate-limited to 6 exports per minute per client.
+
+---
+
 ## ⛔ Gate 0 — Edge access (BLOCKING)
 
 Nothing below can be validated until this passes. **As of the last check, both
