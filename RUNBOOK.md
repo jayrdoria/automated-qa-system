@@ -88,16 +88,24 @@ docker inspect automated-qa-system-web-1 \
 
 ## How alerts decide what to send
 
+**One email per run, sent whenever the run has a failure.** Every red run on the
+dashboard has exactly one matching message in Slack. Nothing waits for a second
+failure or a re-notify window.
+
 | Situation | Email |
 |---|---|
-| A check fails once, passes next run | **Nothing** — a blip. Each run already retries once. |
-| A check fails **2 runs in a row** (~20 min) | 🔴 FAILING |
-| `site-up` fails | 🔴 SITE DOWN — **immediately** |
-| **Every** check fails (even if the homepage loads) | 🔴 SITE DOWN "down or in maintenance" — **immediately** |
-| Login fails and takes game-load / cashier with it | **One** FAILING for Login, listing the others |
-| Still failing | 🟠 STILL FAILING every `ALERT_RENOTIFY_HOURS` |
-| Fixed, after an alert was sent | ✅ RECOVERED (silent if it was never announced) |
-| Whole run refused by Cloudflare | Retried once through a new VPN exit; ⛔ BLOCKED only if that is refused too |
+| A run has any failed check | 🔴 FAILING — **one** email listing every failed check, each marked NEW |
+| The same checks fail again next run | Again — each marked STILL FAILING with "since" and "Nth run in a row" (🟠 when nothing in the run is new) |
+| `site-up` fails | 🔴 SITE DOWN — the other failures in that run are listed in the same email |
+| **Every** check fails (even if the homepage loads) | 🔴 SITE DOWN "down or in maintenance" |
+| Login fails and takes game-load / cashier with it | All listed in the one email; game-load / cashier marked "likely cause: Login" |
+| Checks that were failing pass again | ✅ RECOVERED — **one** email per run listing them |
+| Everything passes, nothing was failing | **Nothing** — silence means all good |
+| Whole run refused by Cloudflare | Retried once through a new VPN exit; ⛔ BLOCKED for every run that is refused too |
+| Some checks refused by Cloudflare in a failing run | Listed as "not tested" in that run's email |
+
+Each failed check in the email shows what broke, a verdict (real site problem vs
+network/VPN), its recent history, its own screenshot, and the technical log.
 
 game-load alerts **per game**, so one broken game cannot flap as the rotation
 moves on. The dependency chain lives in `web/lib/incidents.ts`.
@@ -242,7 +250,7 @@ Run alongside manual checks for **3–5 days** before trusting alerts.
 - [ ] Update `.env` on the VPS, restart, confirm login checks still pass
 - [ ] Confirm the brands' own fraud/velocity rules tolerate a login every
       20 min from one IP — worth raising in the same Cloudflare ticket
-- [ ] Tune `ALERT_RENOTIFY_HOURS` once you see real alert volume
+- [ ] Review Slack alert volume after a week — every failing run now emails
 
 ---
 

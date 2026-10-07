@@ -1,40 +1,42 @@
 import { prisma } from "./prisma";
-import { getEnv } from "./env";
-import { sendAlert, resolveScreenshot, SCREENSHOT_CID } from "./notify";
-import { renderAlert, type AlertKind } from "./email";
-import { CANARY_CHECK, CHECK_LABELS } from "./checks";
-import { groupRun, consequenceReason } from "./incidents";
+import { sendAlert, resolveScreenshot, screenshotCid, type InlineImage } from "./notify";
+import {
+  renderRunAlert,
+  renderRecoveryAlert,
+  renderBlockedAlert,
+  checkLabel,
+  byCheckOrder,
+  type FailedCheck,
+  type RecoveredCheck,
+} from "./email";
+import { CHECK_LABELS } from "./checks";
+import { groupRun } from "./incidents";
 
 /**
- * Alert dedup / anti-flapping.
+ * Turns each ingested run into at most two Slack emails.
  *
- * Alerts fire on the TRANSITION into failing, once on recovery, and again only
- * after ALERT_RENOTIFY_HOURS if still broken. Without this a 2am breakage sends
- * ~30 emails by morning, the channel gets muted, and the system is worse than
- * having no monitoring at all.
+ *  1. EVERY FAILING RUN IS ANNOUNCED. A run with any failed check sends one
+ *     email listing every failure in it, each marked NEW or STILL FAILING.
+ *     Nothing waits for a second strike or a re-notify window: the channel is
+ *     how the team knows each run is clean, so a red run on the dashboard
+ *     always has exactly one email beside it.
  *
- * Four refinements, each driven by what production actually recorded:
+ *  2. ONE RUN, ONE EMAIL. Checks depend on each other (see incidents.ts): when
+ *     login breaks, game-load and the cashier fail with it. They are all
+ *     listed, in one message, with the dependent ones marked as likely caused
+ *     by the check they need. A failed canary, or a run where everything past
+ *     the homepage failed, is headlined SITE DOWN.
  *
- *  1. TWO STRIKES. A FAILING email waits for a second consecutive failed run
- *     (~20 minutes later). One-off blips — a slow VPN exit, a lost race — pass
- *     on the next run and never reach Slack. Each run already retries a failed
- *     check once, so two strikes means four failed attempts in a row.
+ *  3. RECOVERY IS ANNOUNCED ONCE. A run in which previously announced
+ *     failures pass again sends one RECOVERED email listing them. A clean run
+ *     with nothing to recover sends nothing — silence means all good.
  *
- *  2. THE CANARY IS IMMEDIATE. site-up alerts on the first failure: a site that
- *     is down should never wait twenty minutes to be announced.
+ *  4. BLOCKED IS NOT EVIDENCE. A Cloudflare refusal never reached the site,
+ *     so it neither fails nor recovers anything. A run blocked entirely sends
+ *     a BLOCKED email; a partly blocked run lists those checks as not tested.
  *
- *  3. ONE BREAKAGE, ONE ALERT. Checks depend on each other (see incidents.ts):
- *     when the site or its login breaks, everything below it fails in the same
- *     run. One incident in the first fortnight produced 84 red rows that way.
- *     Only the highest failing link is announced, listing what failed because
- *     of it; the rest are still recorded and tracked. When EVERY check in a run
- *     fails, that is treated as down-or-maintenance and announced immediately.
- *
- *  4. BLOCKED IS NOT EVIDENCE. A Cloudflare refusal means the check never
- *     reached the site, so it neither fails nor recovers anything.
- *
- * game-load alert state is kept PER GAME (check key "game-load:multifly"). The
- * check rotates between games, so with a single key one broken game would flap
+ * game-load state is kept PER GAME (check key "game-load:multifly"). The check
+ * rotates between games, so with a single key one broken game would flap
  * FAILING → RECOVERED → FAILING every hour as the rotation moved past it.
  */
 
@@ -53,153 +55,172 @@ export interface IncomingResult {
 
 const DASHBOARD_URL = "https://employee.netovation.eu/automated-qa-system";
 
-/** Consecutive failed runs before a FAILING email. The canary uses 1. */
-const FAIL_THRESHOLD = 2;
+/** How many past runs the per-check history line shows. */
+const HISTORY_RUNS = 6;
 
 export function stateKey(r: Pick<IncomingResult, "checkName" | "target">): string {
   return r.target ? `${r.checkName}:${r.target}` : r.checkName;
 }
 
 export async function processResults(results: IncomingResult[]): Promise<void> {
-  const evidence = results.filter((r) => !r.blocked);
-
-  // Every check blocked at the edge means we never reached the site. One alert
-  // about that, not N claiming N features are broken.
-  if (results.length > 0 && evidence.length === 0) {
-    await handleAllBlocked(results);
-    return;
-  }
-
   // A batch is normally one run (one brand + region), but group defensively so
-  // a canary in one run can never suppress another run's alerts.
+  // one run's results can never be reported under another's.
   const runs = new Map<string, IncomingResult[]>();
-  for (const r of evidence) {
+  for (const r of results) {
     const k = `${r.brand}:${r.region}`;
     runs.set(k, [...(runs.get(k) ?? []), r]);
   }
+  for (const run of runs.values()) await processRun(run);
+}
 
-  for (const run of runs.values()) {
-    const { incidents, allFailed } = groupRun(
-      run.map((r) => ({ checkName: r.checkName, failed: r.status === "fail", r })),
+async function processRun(run: IncomingResult[]): Promise<void> {
+  const evidence = run.filter((r) => !r.blocked);
+
+  // Every check blocked at the edge means we never reached the site. One alert
+  // about that, not N claiming N features are broken.
+  if (evidence.length === 0) {
+    await handleAllBlocked(run);
+    return;
+  }
+
+  const now = new Date();
+  const outcomes: Outcome[] = [];
+  for (const r of evidence) outcomes.push(await advance(r, now));
+
+  const failed = outcomes.filter((o): o is FailOutcome => o.kind === "new" || o.kind === "still-failing");
+  const recovered = outcomes.filter((o): o is RecoveredOutcome => o.kind === "recovered");
+  const first = evidence[0]!;
+
+  if (failed.length > 0) {
+    const { allFailed, incidents } = groupRun(
+      evidence.map((r) => ({ checkName: r.checkName, failed: r.status === "fail", r })),
     );
-    const handled = new Set<IncomingResult>();
-
-    for (const { root, consequences } of incidents) {
-      // The site being down — or everything failing at once, which in practice
-      // means maintenance — is announced at once. Anything narrower waits for
-      // the two-strike rule.
-      const immediate = allFailed || root.checkName === CANARY_CHECK;
-      await advance(root.r, {
-        immediate,
-        allFailed,
-        consequences: consequences.map((c) => CHECK_LABELS[c.checkName] ?? c.checkName),
-        consequenceReason: consequenceReason(root.checkName, allFailed),
-      });
-      handled.add(root.r);
-      for (const c of consequences) {
-        await advance(c.r, { suppress: true });
-        handled.add(c.r);
+    // Hints only — nothing is left out of the email. When everything failed
+    // the lead already says why, and "caused by" the first check would mislead.
+    const causedBy = new Map<IncomingResult, string>();
+    if (!allFailed) {
+      for (const { root, consequences } of incidents) {
+        for (const c of consequences) causedBy.set(c.r, CHECK_LABELS[root.checkName] ?? root.checkName);
       }
     }
 
-    for (const r of run) if (!handled.has(r)) await advance(r, {});
+    // In the order the email lists them, so attachment 1 is item 1's screenshot.
+    const ordered = byCheckOrder(failed.map((o) => ({ ...o, checkName: o.r.checkName })));
+    const images: InlineImage[] = [];
+    const cids = ordered.map((o) => {
+      const shot = resolveScreenshot(o.r.screenshot);
+      if (!shot) return null;
+      const cid = screenshotCid(images.length);
+      images.push({ path: shot, cid });
+      return cid;
+    });
+    const histories = await Promise.all(ordered.map((o) => history(o.r)));
+    const failures: FailedCheck[] = ordered.map((o, i) => ({
+      checkName: o.r.checkName,
+      target: o.r.target,
+      error: o.r.error,
+      isNew: o.kind === "new",
+      since: o.since,
+      streak: o.streak,
+      recent: histories[i],
+      causedBy: causedBy.get(o.r) ?? null,
+      screenshotCid: cids[i],
+    }));
+
+    await sendAlert(
+      renderRunAlert({
+        brand: first.brand,
+        region: first.region,
+        startedAt: new Date(first.startedAt),
+        failures,
+        total: evidence.length,
+        blocked: run.filter((r) => r.blocked).map((r) => checkLabel(r.checkName, r.target)),
+        allFailed,
+        dashboardUrl: DASHBOARD_URL,
+      }),
+      images,
+    );
+  }
+
+  if (recovered.length > 0) {
+    const checks: RecoveredCheck[] = await Promise.all(
+      recovered.map(async (o) => ({
+        checkName: o.r.checkName,
+        target: o.r.target,
+        since: o.since,
+        recent: await history(o.r),
+      })),
+    );
+    await sendAlert(
+      renderRecoveryAlert({
+        brand: first.brand,
+        region: first.region,
+        startedAt: new Date(first.startedAt),
+        recovered: checks,
+        dashboardUrl: DASHBOARD_URL,
+      }),
+    );
   }
 }
 
-interface AdvanceOptions {
-  /** Record the state but announce nothing — a consequence of another failure. */
-  suppress?: boolean;
-  /** Alert on the first failure rather than waiting for two in a row. */
-  immediate?: boolean;
-  allFailed?: boolean;
-  /** What else failed because of this one, and why. */
-  consequences?: string[];
-  consequenceReason?: string;
-}
+type FailOutcome = {
+  kind: "new" | "still-failing";
+  r: IncomingResult;
+  since: Date;
+  streak: number;
+};
+type RecoveredOutcome = { kind: "recovered"; r: IncomingResult; since: Date };
+type Outcome = FailOutcome | RecoveredOutcome | { kind: "none" };
 
-async function advance(r: IncomingResult, opts: AdvanceOptions): Promise<void> {
+/**
+ * Moves one check's stored state forward and says what changed. Sends nothing:
+ * the run decides what to announce once every check in it has been advanced.
+ */
+async function advance(r: IncomingResult, now: Date): Promise<Outcome> {
   const checkName = stateKey(r);
   const key = { brand_region_checkName: { brand: r.brand, region: r.region, checkName } };
   const prev = await prisma.checkState.findUnique({ where: key });
-  const now = new Date();
-  const threshold = opts.immediate || r.checkName === CANARY_CHECK ? 1 : FAIL_THRESHOLD;
-  const failKind: AlertKind = opts.immediate || r.checkName === CANARY_CHECK ? "site-down" : "failing";
-  const context = {
-    consequences: opts.consequences,
-    consequenceReason: opts.consequenceReason,
-    allFailed: opts.allFailed,
-  };
+  // The run's own start, not ingest time — otherwise "failing since" lands a
+  // couple of minutes AFTER "checked at" in the same email.
+  const at = new Date(r.startedAt);
 
   if (r.status === "pass") {
     if (!prev) {
       await prisma.checkState.create({
-        data: { brand: r.brand, region: r.region, checkName, status: "pass", since: now },
+        data: { brand: r.brand, region: r.region, checkName, status: "pass", since: at },
       });
-      return;
+      return { kind: "none" };
     }
     if (prev.status === "fail") {
       await prisma.checkState.update({
         where: key,
-        data: { status: "pass", since: now, failStreak: 0, lastNotifiedAt: null },
+        data: { status: "pass", since: at, failStreak: 0, lastNotifiedAt: null },
       });
-      // Only announce a recovery for a failure we announced. A single blip that
-      // never crossed the threshold recovers silently — nobody was told about it.
-      if (prev.lastNotifiedAt) await notify(r, "recovered", { since: prev.since });
-      return;
+      // Only announce a recovery for a failure that was announced. Since every
+      // failure is now announced, this only stays quiet for blips held back by
+      // the old two-strike rule before this version was deployed.
+      return prev.lastNotifiedAt ? { kind: "recovered", r, since: prev.since } : { kind: "none" };
     }
     await prisma.checkState.update({ where: key, data: { status: "pass", failStreak: 0 } });
-    return;
+    return { kind: "none" };
   }
 
   // ── fail ──
-  if (!prev || prev.status === "pass") {
-    const alertNow = !opts.suppress && threshold <= 1;
-    const data = { status: "fail", since: now, failStreak: 1, lastNotifiedAt: alertNow ? now : null };
+  if (!prev || prev.status !== "fail") {
+    const data = { status: "fail", since: at, failStreak: 1, lastNotifiedAt: now };
     if (prev) await prisma.checkState.update({ where: key, data });
     else await prisma.checkState.create({ data: { brand: r.brand, region: r.region, checkName, ...data } });
-    if (alertNow) await notify(r, failKind, { since: now, ...context });
-    return;
+    return { kind: "new", r, since: at, streak: 1 };
   }
 
-  // Still failing.
   const streak = prev.failStreak + 1;
-  if (opts.suppress) {
-    await prisma.checkState.update({ where: key, data: { failStreak: streak } });
-    return;
-  }
-
-  if (!prev.lastNotifiedAt) {
-    // Failing, but not yet announced: announce once the streak reaches the bar.
-    const alertNow = streak >= threshold;
-    await prisma.checkState.update({
-      where: key,
-      data: { failStreak: streak, ...(alertNow ? { lastNotifiedAt: now } : {}) },
-    });
-    if (alertNow) await notify(r, failKind, { since: prev.since, ...context });
-    return;
-  }
-
-  const hours = Number(getEnv().ALERT_RENOTIFY_HOURS);
-  const due = now.getTime() - prev.lastNotifiedAt.getTime() >= hours * 3600_000;
-  await prisma.checkState.update({
-    where: key,
-    data: { failStreak: streak, ...(due ? { lastNotifiedAt: now } : {}) },
-  });
-  if (due) await notify(r, "still-failing", { since: prev.since });
+  await prisma.checkState.update({ where: key, data: { failStreak: streak, lastNotifiedAt: now } });
+  return { kind: "still-failing", r, since: prev.since, streak };
 }
 
-async function notify(
-  r: IncomingResult,
-  kind: AlertKind,
-  extra: {
-    since?: Date;
-    consequences?: string[];
-    consequenceReason?: string;
-    allFailed?: boolean;
-  },
-): Promise<void> {
-  // History for this exact check (and game), including the run just ingested.
-  const recent = await prisma.checkRun.findMany({
+/** History for this exact check (and game), including the run just ingested. */
+function history(r: IncomingResult): Promise<{ status: string }[]> {
+  return prisma.checkRun.findMany({
     where: {
       brand: r.brand,
       region: r.region,
@@ -207,46 +228,23 @@ async function notify(
       ...(r.target ? { target: r.target } : {}),
     },
     orderBy: { startedAt: "desc" },
-    take: 6,
+    take: HISTORY_RUNS,
     select: { status: true },
   });
-
-  const screenshotPath = kind === "recovered" ? null : resolveScreenshot(r.screenshot);
-  const email = renderAlert({
-    kind,
-    brand: r.brand,
-    region: r.region,
-    checkName: r.checkName,
-    target: r.target,
-    error: r.error,
-    startedAt: new Date(r.startedAt),
-    since: extra.since,
-    recent,
-    consequences: extra.consequences,
-    consequenceReason: extra.consequenceReason,
-    allFailed: extra.allFailed,
-    dashboardUrl: DASHBOARD_URL,
-    screenshotCid: screenshotPath ? SCREENSHOT_CID : null,
-  });
-  await sendAlert(email, screenshotPath);
 }
 
 /**
- * Edge blocks are deduped on a single synthetic key so repeated runs behave
- * like any other failing check rather than emailing every 20 minutes.
+ * Announced every blocked run, like any failure: a blocked run means nobody
+ * knows whether the site works, which is exactly what the channel is for. The
+ * runner already retries a blocked run once through a fresh VPN exit, so this
+ * only fires when that retry was refused too. State is kept for the record.
  */
-async function handleAllBlocked(results: IncomingResult[]): Promise<void> {
+async function handleAllBlocked(run: IncomingResult[]): Promise<void> {
   const key = {
     brand_region_checkName: { brand: "_system", region: "XX", checkName: "edge-access" },
   };
   const prev = await prisma.checkState.findUnique({ where: key });
   const now = new Date();
-  const hours = Number(getEnv().ALERT_RENOTIFY_HOURS);
-
-  const shouldNotify =
-    !prev ||
-    prev.status === "pass" ||
-    now.getTime() - (prev.lastNotifiedAt?.getTime() ?? 0) >= hours * 3600_000;
 
   await prisma.checkState.upsert({
     where: key,
@@ -257,28 +255,23 @@ async function handleAllBlocked(results: IncomingResult[]): Promise<void> {
       status: "fail",
       since: now,
       failStreak: 1,
-      lastNotifiedAt: shouldNotify ? now : null,
+      lastNotifiedAt: now,
     },
     update: {
       status: "fail",
       failStreak: { increment: 1 },
       ...(prev?.status === "pass" ? { since: now } : {}),
-      ...(shouldNotify ? { lastNotifiedAt: now } : {}),
+      lastNotifiedAt: now,
     },
   });
 
-  if (!shouldNotify) return;
-
-  const first = results[0]!;
+  const first = run[0]!;
   await sendAlert(
-    renderAlert({
-      kind: "blocked",
+    renderBlockedAlert({
       brand: first.brand,
       region: first.region,
-      checkName: first.checkName,
-      error: first.error,
       startedAt: new Date(first.startedAt),
-      blockedCount: results.length,
+      blockedCount: run.length,
       dashboardUrl: DASHBOARD_URL,
     }),
   );

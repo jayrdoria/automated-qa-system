@@ -30,8 +30,16 @@ function getTransporter(): Transporter | null {
 
 const ARTIFACTS_ROOT = process.env.ARTIFACTS_DIR ?? "/app/artifacts/test-results";
 
-/** Content-ID the HTML body references to show the screenshot inline. */
-export const SCREENSHOT_CID = "failure-screenshot@qa-monitor";
+/** An image the HTML body shows inline via `cid:`. */
+export interface InlineImage {
+  path: string;
+  cid: string;
+}
+
+/** Content-ID for the screenshot of the nth failed check in a run email. */
+export function screenshotCid(index: number): string {
+  return `failure-${index + 1}@qa-monitor`;
+}
 
 /**
  * Resolves a runner-reported screenshot path to a file that exists, or null.
@@ -68,7 +76,7 @@ function sendingAllowed(): boolean {
 
 export async function sendAlert(
   email: RenderedEmail,
-  screenshotPath?: string | null,
+  images: InlineImage[] = [],
 ): Promise<boolean> {
   if (!sendingAllowed()) {
     console.warn(`[notify] not production — suppressed alert: ${email.subject}`);
@@ -88,9 +96,13 @@ export async function sendAlert(
       subject: email.subject,
       text: email.text,
       html: email.html,
-      attachments: screenshotPath
-        ? [{ filename: path.basename(screenshotPath), path: screenshotPath, cid: SCREENSHOT_CID }]
-        : [],
+      // Playwright names every failure screenshot test-failed-1.png, so the
+      // filename is prefixed to keep them apart in mail clients' attachment lists.
+      attachments: images.map((img, i) => ({
+        filename: `${i + 1}-${path.basename(img.path)}`,
+        path: img.path,
+        cid: img.cid,
+      })),
     });
     return true;
   } catch (e) {

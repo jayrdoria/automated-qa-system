@@ -31,8 +31,9 @@ model CheckRun {
   @@map("check_run")
 }
 
-/// Current known status per check, driving alert dedup so a broken check
-/// doesn't email the Slack channel every 20 minutes overnight.
+/// Current known status per check. Every failing run is emailed; this is what
+/// lets that email say NEW vs STILL FAILING (since when, how many runs) and
+/// lets a later passing run announce the recovery.
 model CheckState {
   id             String    @id @default(cuid())
   brand          String
@@ -41,8 +42,7 @@ model CheckState {
   status         String
   since          DateTime
   lastNotifiedAt DateTime? @map("last_notified_at")
-  /// Consecutive failed runs. A FAILING alert waits for 2, so a single blip
-  /// that passes on the next run never reaches Slack. The canary alerts at 1.
+  /// Consecutive failed runs — shown in the alert as "3rd run in a row".
   failStreak     Int       @default(0) @map("fail_streak")
   updatedAt      DateTime  @updatedAt @map("updated_at")
 

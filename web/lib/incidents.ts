@@ -8,10 +8,11 @@
  * separately, one broken login looked like three broken features.
  *
  * So within a single run, only the HIGHEST failing link in each chain is an
- * incident (a "root"); anything that failed below it is a consequence and is
- * reported inside the root's alert instead of as its own. And when EVERY check
- * in a run fails, the site is down or in maintenance, whatever the individual
- * errors say.
+ * incident (a "root"); anything that failed below it is a consequence. The
+ * failures panel collapses consequences under their root; the alert email
+ * still lists every failure, marking consequences as likely caused by the
+ * root. And when EVERY check in a run fails, the site is down or in
+ * maintenance, whatever the individual errors say.
  *
  * Pure and dependency-free: alerting and the dashboard use the same grouping,
  * so what the email says and what the failures panel shows cannot drift apart.
