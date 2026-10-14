@@ -304,8 +304,8 @@ export default async function DashboardPage({
 
   const [latestRuns, recentRuns, totalRuns, progressRows, medianRows] = await Promise.all([
     // Postgres DISTINCT ON — the newest row per brand/region/check, and per GAME
-    // for game-load, so a broken game is not hidden behind a passing one that
-    // happened to run more recently.
+    // for game-load. The cell shows the newest of these (the latest run); the
+    // per-game rows feed its tooltip.
     prisma.$queryRaw<
       {
         brand: string;
@@ -371,25 +371,15 @@ export default async function DashboardPage({
   }
 
   /**
-   * The row a cell represents. For single-target checks, the only row. For
-   * game-load, the WORST current game: a cell is red while any game's latest
-   * result is a real failure, even if the rotation has since passed a different
-   * game. Otherwise a broken Multifly would flash red for one run an hour and
-   * look green the rest of the time.
+   * The row a cell represents: the LATEST result, whichever game it tested.
+   * game-load's games are only a rotation — a failed run shows red, and the
+   * next passing run (any game) shows green. Per-game latest results are still
+   * listed in the cell's tooltip.
    */
   function cellRow(key: string): { row: LatestRow | undefined; games: LatestRow[] } {
     const rows = rowsByKey.get(key) ?? [];
-    const targeted = rows.filter((r) => r.target);
-    if (targeted.length === 0) {
-      const row = rows.slice().sort((a, b) => b.startedAt.getTime() - a.startedAt.getTime())[0];
-      return { row, games: [] };
-    }
-    // Pre-rotation rows (target NULL) are superseded once any game has reported.
-    const fresh = targeted.filter((r) => statusOf(r) !== "stale");
-    const pool = fresh.length ? fresh : targeted;
-    const newestFirst = pool.slice().sort((a, b) => b.startedAt.getTime() - a.startedAt.getTime());
-    const row = newestFirst.find((r) => statusOf(r) === "fail") ?? newestFirst[0];
-    return { row, games: targeted };
+    const row = rows.slice().sort((a, b) => b.startedAt.getTime() - a.startedAt.getTime())[0];
+    return { row, games: rows.filter((r) => r.target) };
   }
 
   /*
@@ -684,9 +674,7 @@ export default async function DashboardPage({
                             CELL_LABELS[status]
                           )}
                         </span>
-                        {/* game-load is red while ANY game's latest result is
-                            failing, so a green run of a different game does not
-                            clear it. Naming the game makes that readable. */}
+                        {/* Which game the failing run tested. */}
                         {status === "fail" && last?.target && (
                           <span className="mt-0.5 block text-[10px] leading-tight text-neutral-500 dark:text-neutral-400">
                             {gameName(last.target)}

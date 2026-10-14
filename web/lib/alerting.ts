@@ -35,9 +35,11 @@ import { groupRun } from "./incidents";
  *     so it neither fails nor recovers anything. A run blocked entirely sends
  *     a BLOCKED email; a partly blocked run lists those checks as not tested.
  *
- * game-load state is kept PER GAME (check key "game-load:multifly"). The check
- * rotates between games, so with a single key one broken game would flap
- * FAILING → RECOVERED → FAILING every hour as the rotation moved past it.
+ * game-load state is kept PER CHECK, not per game. The games are only a
+ * rotation: the verdict is whatever the latest run found, whichever game it
+ * tested — a failing run alerts, the next passing run recovers it. (Per-game
+ * state kept a column red until that same game came round again; see
+ * migration 0009.) The game is still named in every email.
  */
 
 export interface IncomingResult {
@@ -58,8 +60,9 @@ const DASHBOARD_URL = "https://employee.netovation.eu/automated-qa-system";
 /** How many past runs the per-check history line shows. */
 const HISTORY_RUNS = 6;
 
-export function stateKey(r: Pick<IncomingResult, "checkName" | "target">): string {
-  return r.target ? `${r.checkName}:${r.target}` : r.checkName;
+/** One alert state per check — the game a run tested does not split it. */
+export function stateKey(r: Pick<IncomingResult, "checkName">): string {
+  return r.checkName;
 }
 
 export async function processResults(results: IncomingResult[]): Promise<void> {
@@ -218,14 +221,13 @@ async function advance(r: IncomingResult, now: Date): Promise<Outcome> {
   return { kind: "still-failing", r, since: prev.since, streak };
 }
 
-/** History for this exact check (and game), including the run just ingested. */
+/** History for this check (any game), including the run just ingested. */
 function history(r: IncomingResult): Promise<{ status: string }[]> {
   return prisma.checkRun.findMany({
     where: {
       brand: r.brand,
       region: r.region,
       checkName: r.checkName,
-      ...(r.target ? { target: r.target } : {}),
     },
     orderBy: { startedAt: "desc" },
     take: HISTORY_RUNS,

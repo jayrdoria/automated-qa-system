@@ -109,8 +109,10 @@ failure or a re-notify window.
 Each failed check in the email shows what broke, a verdict (real site problem vs
 network/VPN), its recent history, its own screenshot, and the technical log.
 
-game-load alerts **per game**, so one broken game cannot flap as the rotation
-moves on. The dependency chain lives in `web/lib/incidents.ts`.
+game-load is judged **per run, not per game**: the games are only a rotation.
+A failing run alerts (naming the game it tested); the next passing run — any
+game — recovers it, and the dashboard cell always shows the latest run. The
+dependency chain lives in `web/lib/incidents.ts`.
 
 **Local dev never sends real email.** The Prisma client auto-loads the root
 `.env`, which holds the real SMTP credentials, so a local `next dev` has them.
