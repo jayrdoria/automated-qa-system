@@ -13,9 +13,9 @@ import { gotoChecked } from "../../lib/preflight";
  * Deliberately shallow: no auth, no third-party widgets, nothing that can fail
  * for a reason other than "the site isn't serving".
  */
-// Exactly ONE domain runs per region: activeBrands() resolves CHECK_REGION to
-// its mirror (FR/IT -> stakes3, DE/ES -> stakes, BD -> stakescasino) and the
-// rest skip. The describe-block title stays equal to the brand id, which is
+// Exactly ONE domain runs per invocation: activeBrands() resolves CHECK_REGION
+// (+ CHECK_SITE) to its column (FR/IT -> stakes3, DE/ES -> stakes,
+// BD -> stakescasino, FR/DE/IT + x7 -> x7casino2.com) and the rest skip. The describe-block title stays equal to the brand id, which is
 // what the reporter files results under.
 for (const id of BRAND_IDS) {
   const enabled = () => activeBrands().includes(id);

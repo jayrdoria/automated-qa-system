@@ -9,7 +9,7 @@ import type {
 import path from "node:path";
 import fs from "node:fs";
 import { getConfig } from "../lib/config";
-import { BRAND_IDS, siteForRegion, type BrandId } from "../lib/brands";
+import { BRAND_IDS, currentSite as siteForThisRun, type BrandId } from "../lib/brands";
 
 /**
  * Is this describe-block title one of our brands?
@@ -26,12 +26,12 @@ function isBrand(title: string): title is BrandId {
 }
 
 /**
- * The single domain this run is testing, derived from CHECK_REGION.
+ * The single domain this run is testing, from CHECK_REGION + CHECK_SITE.
  * Used for the progress row, which is keyed by brand+region.
  */
 function currentSite(): BrandId | undefined {
   try {
-    return siteForRegion(getConfig().CHECK_REGION);
+    return siteForThisRun();
   } catch {
     return undefined;
   }
@@ -132,9 +132,9 @@ export default class QaReporter implements Reporter {
     /*
      * Count only checks that will actually REPORT.
      *
-     * suite.allTests() includes X7 even when X7_ENABLED=false — those are
-     * skipped at runtime, not excluded from the suite. Counting them made the
-     * denominator 14 instead of 7, so a fully successful run displayed as
+     * suite.allTests() includes every brand's tests even though only one site
+     * runs — the rest are skipped at runtime, not excluded from the suite.
+     * Counting them made the denominator 14 instead of 7, so a fully successful run displayed as
      * "7/14 · 50%" and the bar never filled.
      */
     const site = currentSite();
@@ -172,8 +172,8 @@ export default class QaReporter implements Reporter {
     if (!isBrand(brand)) return;
 
     // A skipped check produced NO evidence. Reporting it as "fail" (anything
-    // not "passed") would post deferred X7 checks as 7 failures every run and
-    // permanently redden a dashboard that is working correctly.
+    // not "passed") would post every other site's checks as failures every run
+    // and permanently redden a dashboard that is working correctly.
     if (result.status === "skipped") return;
 
     const errorText = result.error?.message ?? null;

@@ -1,6 +1,6 @@
-import type { Page, Locator } from "@playwright/test";
+import { expect, type Page, type Locator, type Response } from "@playwright/test";
 import { getConfig } from "./config";
-import { STAKES_GAMES, type GameTarget } from "./games";
+import { STAKES_GAMES, X7_GAMES, type GameTarget } from "./games";
 
 /**
  * ─────────────────────────────────────────────────────────────────────────
@@ -17,9 +17,8 @@ import { STAKES_GAMES, type GameTarget } from "./games";
  *   3. placeholder/text — what we use now, derived from the login screenshot
  *   4. CSS classes      — last resort, breaks on every deploy
  *
- * Stakes selectors below come from the real login page. X7 selectors are
- * best-effort and flagged; they need one pass with `npm run recon` from a
- * location that can actually reach the site.
+ * Stakes selectors below come from the real login page. X7 selectors were
+ * measured against the live x7casino2.com DOM through a FR exit.
  */
 
 export type BrandId = "stakes" | "stakes3" | "stakescasino" | "x7";
@@ -39,20 +38,44 @@ const COLUMNS: { region: string; site: BrandId }[] = [
   { region: "IT", site: "stakes3" },
   { region: "ES", site: "stakes" },
   { region: "BD", site: "stakescasino" },
+  // X7 shares the FR/DE/IT exits with Stakes. Appended, never interleaved: a
+  // region's FIRST entry is its default site (see resolveSite), and the Stakes
+  // columns' indices drive their game rotation — both must stay as they were.
+  // No ES (geo-blocked) and no BD/EN column for X7.
+  { region: "FR", site: "x7" },
+  { region: "DE", site: "x7" },
+  { region: "IT", site: "x7" },
 ];
 
 /**
- * Returns undefined for an unknown region rather than defaulting to a site.
- * A typo'd CHECK_REGION that silently tested the wrong domain and filed the
- * results under it would be far worse than a loud failure.
+ * The domain a (region, site) pair tests.
+ *
+ * `site` omitted -> the region's FIRST column, which keeps every pre-X7 cron
+ * line (`run-checks.sh FR`) testing exactly what it tested before.
+ * `site` given   -> must be a real pair, e.g. FR+x7. DE+stakes3 is not.
+ *
+ * Returns undefined for anything unknown rather than defaulting to a site.
+ * A typo'd CHECK_REGION/CHECK_SITE that silently tested the wrong domain and
+ * filed the results under it would be far worse than a loud failure.
  */
-export function siteForRegion(region: string): BrandId | undefined {
-  return COLUMNS.find((c) => c.region === region)?.site;
+export function resolveSite(region: string, site?: string): BrandId | undefined {
+  const cols = COLUMNS.filter((c) => c.region === region);
+  if (site === undefined) return cols[0]?.site;
+  return cols.find((c) => c.site === site)?.site;
 }
 
-/** Position of a region in COLUMNS — offsets the game rotation per column. */
-export function columnIndex(region: string): number {
-  return COLUMNS.findIndex((c) => c.region === region);
+/** The domain THIS run is testing, from CHECK_REGION + CHECK_SITE. */
+export function currentSite(): BrandId | undefined {
+  const c = getConfig();
+  return resolveSite(c.CHECK_REGION, c.CHECK_SITE);
+}
+
+/**
+ * Position of a column in COLUMNS — offsets the game rotation per column.
+ * Stakes columns resolve to the same indices (0-4) they always had.
+ */
+export function columnIndex(region: string, site: BrandId): number {
+  return COLUMNS.findIndex((c) => c.region === region && c.site === site);
 }
 
 export interface BrandConfig {
@@ -68,6 +91,12 @@ export interface BrandConfig {
   games: GameTarget[];
   /** Real-play URL for one of this brand's games, on this brand's own host. */
   gameUrl: (game: GameTarget) => string;
+  /**
+   * What the page URL must still contain once the game page has loaded. A
+   * removed game bounces back to the lobby with a 200, so this is what tells
+   * "game page" from "lobby".
+   */
+  gameUrlFragment: (game: GameTarget) => string;
 
   /** Opens the login form. Stakes reveals an inline form; X7 opens a modal. */
   openLogin: (page: Page) => Promise<void>;
@@ -96,6 +125,26 @@ export interface BrandConfig {
   chatWidget: (page: Page) => Locator;
   depositButton: (page: Page) => Locator;
   cashierModal: (page: Page) => Locator;
+  /**
+   * Optional: content that proves the cashier is usable, not just open.
+   * Asserted non-empty after the modal is visible. Undefined skips it.
+   */
+  cashierContent?: (page: Page) => Locator;
+  /** How long the chat widget may take to mount. Defaults to 45s. */
+  chatTimeoutMs?: number;
+  /**
+   * Optional: waits after a verified login until the session survives a
+   * navigation. Undefined (Stakes) means the session is usable as soon as the
+   * login control disappears.
+   */
+  sessionReady?: (page: Page) => Promise<void>;
+  /**
+   * Optional: inspects responses while a game page loads and returns a short
+   * reason when the platform REFUSED the launch (null otherwise). Lets the
+   * failure say "the site refused" instead of the generic "iframe never
+   * appeared". Undefined (Stakes) leaves game-load exactly as it was.
+   */
+  gameLaunchRefusal?: (response: Response) => Promise<string | null>;
 }
 
 /**
@@ -221,6 +270,7 @@ function stakesLike(
     // URL is always built on THIS brand's host: stakes3 tests stakes3.com/game/…
     games: STAKES_GAMES,
     gameUrl: (game) => `${baseUrl}/game/${game.path}/real`,
+    gameUrlFragment: (game) => `/game/${game.path}`,
 
     // getByRole cannot match this button — its accessible name differs from its
     // visible text (verified: getByRole returned 0 matches while the DOM shows
@@ -349,59 +399,143 @@ function stakescasino(): BrandConfig {
   );
 }
 
+/**
+ * X7 Casino on x7casino2.com — a different platform from Stakes, so it has its
+ * own selector set. Everything below was measured on the live DOM (FR exit).
+ *
+ * Language comes from the URL, not the IP: /en, /fr, /de and /it all serve
+ * from a French exit. Each column therefore pins its own language prefix, so a
+ * DE run always gets the German UI regardless of how the root redirects.
+ *
+ * Traps this config deliberately avoids:
+ *  - The home page carries a SIGN-UP form (`.hero-form`) with its own
+ *    `input[name="password_input"]` and `form.login-content-form` — the same
+ *    name and class the login modal uses. Every login selector is scoped to
+ *    `#login-modal`, or the check would type credentials into registration.
+ *  - "CREATE ACCOUNT" is visible while logged out and contains "account", so
+ *    the shared RE.loggedIn would read a rejected login as a success. The
+ *    logged-in marker is the sidebar's `.auth` state instead.
+ *  - The submit button is "S'identifier" on /fr — no shared submit word —
+ *    and disabled until both fields are filled. Matched by class, not text.
+ */
+const X7_LOCALES: Record<string, string> = { FR: "fr", DE: "de", IT: "it" };
+
+// Sidebar login control, per locale: LOGIN / CONNEXION / ANMELDUNG / ACCEDI.
+const X7_LOGIN = /^(log\s?in|connexion|anmeldung|anmelden|accedi)$/i;
+
+/** Buttons in the sidebar's user box while logged OUT ("CREATE ACCOUNT", "LOGIN"). */
+const X7_LOGGED_OUT_BUTTONS = ".sidebar-wrapper:not(.auth) .sidebar-user-section button";
+
 function x7(): BrandConfig {
   const c = getConfig();
+  const origin = c.X7_BASE_URL.replace(/\/+$/, "");
+  const baseUrl = `${origin}/${X7_LOCALES[c.CHECK_REGION] ?? "en"}`;
+  const loginModal = (page: Page) => page.locator("#login-modal");
+  const loginButton = (page: Page) =>
+    page.locator(X7_LOGGED_OUT_BUTTONS).filter({ hasText: X7_LOGIN }).filter({ visible: true });
+
   return {
     id: "x7",
-    label: "X7 Casino",
-    baseUrl: c.X7_BASE_URL,
-    username: c.X7_USERNAME,
-    password: c.X7_PASSWORD,
-    casinoPath: "/en/casino",
-    // X7 uses a different catalogue and URL scheme. Single game, no provider-id
-    // assertion — its DOM has never been observed (still Cloudflare-blocked).
-    games: [
-      {
-        id: "wanted-dead-or-a-wild",
-        name: "Wanted Dead or a Wild",
-        path: "0z-wanted-dead-or-a-wild",
-      },
-    ],
-    gameUrl: (game) => `${c.X7_BASE_URL}/en/casino/hacksaw/${game.path}/real`,
+    // A hostname like the other brands' labels: the dashboard and emails strip
+    // a leading "<host>.com: " from errors, and show the host elsewhere.
+    label: "X7Casino2.com",
+    baseUrl,
+    username: requireCredential(c.X7_USERNAME, "X7_USERNAME", "x7casino2.com"),
+    password: requireCredential(c.X7_PASSWORD, "X7_PASSWORD", "x7casino2.com"),
+    casinoPath: "/casino",
+    games: X7_GAMES,
+    gameUrl: (game) => `${baseUrl}/casino/${game.path}/real`,
+    gameUrlFragment: (game) => `/casino/${game.path}`,
 
-    loginTrigger: (page) => clickable(page, RE.login),
-    // ⚠ UNVERIFIED — X7 opens a login MODAL and is still Cloudflare-challenged.
+    // Scoped to the logged-OUT sidebar: once authenticated the wrapper gains
+    // `.auth` and this matches nothing, which is what loginAndVerify waits for.
+    loginTrigger: loginButton,
+    /*
+     * Click-until-open, not click-once. The sidebar renders before the SPA
+     * attaches its handlers, so a click right after domcontentloaded is
+     * silently dropped — measured: the modal never opened and every
+     * login-dependent check failed while the site was fine.
+     */
     openLogin: async (page) => {
-      await clickable(page, RE.login).first().click();
-      await page.locator('[role="dialog"], [class*="modal" i]').first().waitFor({
-        state: "visible",
-        timeout: 15000,
-      });
+      const btn = loginButton(page).first();
+      await btn.waitFor({ state: "visible", timeout: 15_000 });
+      const field = loginModal(page).locator('input[name="email_username_input"]');
+      await expect(async () => {
+        if (!(await field.isVisible())) await btn.click({ timeout: 5_000 });
+        await field.waitFor({ state: "visible", timeout: 3_000 });
+      }).toPass({ timeout: 30_000 });
     },
-    usernameField: (page) => page.getByPlaceholder(RE.username).first(),
-    passwordField: (page) => page.getByPlaceholder(RE.password).first(),
-    submitLogin: (page) => clickable(page, RE.submit).last(),
-    loggedInMarker: (page) =>
-      clickable(page, RE.loggedIn).first(),
-    loginErrorMarker: (page) => page.getByText(RE.error).first(),
+    usernameField: (page) => loginModal(page).locator('input[name="email_username_input"]'),
+    passwordField: (page) => loginModal(page).locator('input[name="password_input"]'),
+    submitLogin: (page) => loginModal(page).locator("button.login-button"),
+    // Measured: present only after a successful login. A rejected login leaves
+    // the modal open and the sidebar unauthenticated.
+    loggedInMarker: (page) => page.locator(".sidebar-wrapper.auth").filter({ visible: true }),
+    loginErrorMarker: (page) => loginModal(page).locator(".error_label").filter({ hasText: /\S/ }),
 
-    // ⚠ All X7 selectors below are UNVERIFIED — the site is still behind a
-    // Cloudflare challenge, so its DOM has never been observed. Structure
-    // mirrors Stakes as a starting point; expect to correct these once the
-    // whitelist lands.
+    // "Providers" / "Fournisseurs" / ... on /casino; opens a list of provider
+    // entries (44 measured), rendered OUTSIDE .game-filter. Same
+    // click-until-open as login, for the same hydration reason. Counted, not
+    // visibility-checked: the list scrolls, so most entries are off-screen.
     openProviders: async (page) => {
-      const toggle = clickable(page, RE.providers).first();
-      await toggle.waitFor({ state: "visible", timeout: 20_000 });
-      await toggle.click();
+      const btn = page.locator(".providers-menu-btn").filter({ visible: true }).first();
+      await btn.waitFor({ state: "visible", timeout: 20_000 });
+      const items = page.locator(".providers-menu-list-item");
+      await expect(async () => {
+        if ((await items.count()) === 0) await btn.click({ timeout: 5_000 });
+        await expect(items.first()).toBeAttached({ timeout: 3_000 });
+      }).toPass({ timeout: 30_000 });
     },
-    providerTiles: (page) => page.locator('input[type="checkbox"]'),
-    gameFrame: (page) =>
-      page.locator('iframe[src*="game" i], iframe[allow*="fullscreen" i], main iframe').first(),
-    chatWidget: (page) =>
-      page.locator('#zsiq_float, .zsiq-float, #zs_fl_chat, .zsiq-chat-icn, #launcher'),
-    depositButton: (page) => clickable(page, RE.deposit).first(),
-    cashierModal: (page) =>
-      page.locator('.experience-cashier-modal, .experience-cashier-full, [role="dialog"]').first(),
+    providerTiles: (page) => page.locator(".providers-menu-list-item"),
+    gameFrame: (page) => page.locator("iframe#gameFrame, iframe.game-iframe").first(),
+    // Zoho SalesIQ, same widget ids as Stakes. Measured ~41s to mount while
+    // logged out — too close to the 45s Stakes budget.
+    chatWidget: (page) => page.locator("#zsiq_float, .zsiq-float, #zs_fl_chat, .zsiq-chat-icn"),
+    chatTimeoutMs: 90_000,
+    // The only button in the authenticated sidebar's user box ("DÉPOSER",
+    // "DEPOSIT", ...). Structural, so it holds in every locale.
+    depositButton: (page) =>
+      page
+        .locator(".sidebar-wrapper.auth .sidebar-user-section .buttons-wrapper button")
+        .filter({ visible: true })
+        .first(),
+    cashierModal: (page) => page.locator(".cashier-modal.show").first(),
+    // Payment-method tiles (Mifinity, Pay By Crypto, ...). An open cashier
+    // with no methods is a broken cashier.
+    cashierContent: (page) => page.locator(".cashier-modal.show .ec-payment-grid-item"),
+    /*
+     * The sidebar flips to `.auth` before the session is fully written. A
+     * navigation in that window keeps the sidebar logged in but launches the
+     * game unauthenticated ("Erreur lors du chargement du jeu") — measured 2/2
+     * failures navigating immediately, 3/3 passes once the `uesign` cookie
+     * (~1-1.5s after login) exists.
+     *
+     * Soft on purpose: if the cookie is ever renamed, login itself is already
+     * proven by the sidebar, so this only falls back to a fixed settle instead
+     * of failing the login check. game-load would still fail on a dead session.
+     */
+    sessionReady: async (page) => {
+      const deadline = Date.now() + 10_000;
+      while (Date.now() < deadline) {
+        const cookies = await page.context().cookies();
+        if (cookies.some((ck) => ck.name === "uesign")) return;
+        await page.waitForTimeout(250);
+      }
+      console.warn("[x7] session cookie not seen within 10s — continuing after fixed settle");
+      await page.waitForTimeout(2_000);
+    },
+    /*
+     * GET …/player/game/<id> is the launch call. Measured: it intermittently
+     * answers 403 {"info":{"resultCode":"gameplay_blocked"}} for the test
+     * account on every game while the session is valid — the page then shows
+     * "Erreur lors du chargement du jeu" and no frame.
+     */
+    gameLaunchRefusal: async (res) => {
+      if (!/\/player\/game\/\d+/.test(res.url()) || res.status() < 400) return null;
+      const body = (await res.json().catch(() => null)) as { info?: { resultCode?: unknown } } | null;
+      const code = typeof body?.info?.resultCode === "string" ? body.info.resultCode : "no reason given";
+      return `HTTP ${res.status()} ${code}`;
+    },
   };
 }
 
@@ -419,21 +553,17 @@ export function getBrand(id: BrandId): BrandConfig {
 }
 
 /**
- * Exactly ONE domain is tested per run, chosen by CHECK_REGION.
+ * Exactly ONE domain is tested per run, chosen by CHECK_REGION + CHECK_SITE.
  *
- * Each market is served by a single mirror, so a DE run must not also drive
- * stakes3.com — that would double the traffic from one VPN exit and file
- * results under a column that is not being checked.
+ * FR carries two columns (stakes3, x7), but each is its own run: one run
+ * driving both would double the traffic from one VPN exit, and a block on one
+ * brand would hold back the other's results.
  *
- * Returns an empty array for an unknown region, which makes every spec skip and
+ * Returns an empty array for an unknown pair, which makes every spec skip and
  * the reporter post nothing, rather than guessing a domain.
- *
- * X7 is unreachable here by design: it has no entry in COLUMNS, so no region
- * selects it. Its selectors stay wired up for the day its Cloudflare challenge
- * is lifted and it earns a column.
  */
 export function activeBrands(): BrandId[] {
-  const site = siteForRegion(getConfig().CHECK_REGION);
+  const site = currentSite();
   return site ? [site] : [];
 }
 

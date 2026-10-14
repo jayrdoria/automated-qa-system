@@ -2,9 +2,9 @@ import { test, expect } from "@playwright/test";
 import { BRAND_IDS, activeBrands, getBrand } from "../../lib/brands";
 import { gotoChecked } from "../../lib/preflight";
 
-// Exactly ONE domain runs per region: activeBrands() resolves CHECK_REGION to
-// its mirror (FR/IT -> stakes3, DE/ES -> stakes, BD -> stakescasino) and the
-// rest skip. The describe-block title stays equal to the brand id, which is
+// Exactly ONE domain runs per invocation: activeBrands() resolves CHECK_REGION
+// (+ CHECK_SITE) to its column (FR/IT -> stakes3, DE/ES -> stakes,
+// BD -> stakescasino, FR/DE/IT + x7 -> x7casino2.com) and the rest skip. The describe-block title stays equal to the brand id, which is
 // what the reporter files results under.
 for (const id of BRAND_IDS) {
   const enabled = () => activeBrands().includes(id);

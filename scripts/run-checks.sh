@@ -1,9 +1,11 @@
 #!/usr/bin/env bash
 #
-# Cron entrypoint. One region per invocation:  ./scripts/run-checks.sh FR
+# Cron entrypoint. One column per invocation:
+#   ./scripts/run-checks.sh FR        -> the region's default site (stakes3)
+#   ./scripts/run-checks.sh FR x7     -> X7 Casino through the same FR exit
 #
-# Per-region flock: FR and DE are independent runs and must not block each
-# other, but two FR runs must never overlap.
+# The SITE argument is optional so every pre-existing cron line keeps meaning
+# exactly what it meant before X7 was added.
 #
 # Routes through a VPN exit node in the target country. The VPS is in Singapore
 # and the brands geo-block it, so without this every check reports EDGE_BLOCKED.
@@ -11,9 +13,10 @@
 # MailCraft and n8n are untouched.
 set -euo pipefail
 
-# The region also selects WHICH DOMAIN is checked — see COLUMNS in
-# web/lib/checks.ts and runner/lib/brands.ts:
+# The region (+ optional site) selects WHICH DOMAIN is checked — see COLUMNS
+# in web/lib/checks.ts and runner/lib/brands.ts:
 #   FR, IT -> stakes3.com      DE, ES -> stakes.com      BD -> stakescasino.com
+#   FR x7, DE x7, IT x7 -> x7casino2.com
 #
 # BD is not a market the brand sells to. stakescasino.com is geo-blocked from
 # the Singapore VPS like the others, and a Bangladesh exit is simply one that
@@ -30,6 +33,16 @@ esac
 # Drop the region arg — anything left is passed through to playwright. Without
 # this the region lands in "$@" and docker tries to exec "FR" as the command.
 shift || true
+
+# Optional site. Only values that are NOT a playwright argument are taken, so
+# `run-checks.sh FR --grep login` still passes --grep through untouched.
+SITE=""
+case "${1:-}" in
+  x7) SITE="$1"; shift ;;
+esac
+# Names this column's stamp/log. Bare region for the default site, so the
+# existing .last-complete-FR stamps carry straight over.
+COLUMN="${REGION}${SITE:+-$SITE}"
 
 APP_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
@@ -49,8 +62,8 @@ APP_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 # ⚠ DUPLICATED as RUN_INTERVAL_MIN in web/lib/checks.ts. Change one and you must
 # change the other, or the dashboard countdown disagrees with the scheduler and
 # reports columns as overdue while they are running exactly on time.
-MIN_INTERVAL_MIN="${MIN_INTERVAL_MIN:-20}"
-STAMP="${APP_DIR}/logs/.last-complete-${REGION}"
+MIN_INTERVAL_MIN="${MIN_INTERVAL_MIN:-25}"
+STAMP="${APP_DIR}/logs/.last-complete-${COLUMN}"
 LOCK_FILE="/tmp/automated-qa-system.lock"          # global, not per-region
 COMPOSE="docker compose -f docker-compose.prod.yml -f docker-compose.vpn.yml"
 
@@ -58,6 +71,7 @@ cd "$APP_DIR"
 mkdir -p artifacts logs
 
 export CHECK_REGION="$REGION"
+export CHECK_SITE="$SITE"
 export SERVER_COUNTRIES="$COUNTRY"
 
 # Written by the reporter when an ENTIRE run was refused by Cloudflare and it
@@ -90,11 +104,12 @@ tunnel_up() {
 # and it would race with the health gate.
 run_suite() {
   local defer="$1"; shift
-  $COMPOSE --profile batch run --rm --no-deps -e DEFER_IF_BLOCKED="$defer" runner "$@"
+  $COMPOSE --profile batch run --rm --no-deps -e DEFER_IF_BLOCKED="$defer" \
+    -e CHECK_SITE="$SITE" runner "$@"
 }
 
 run() {
-  echo "=== $(date -Is) starting [${REGION} / ${COUNTRY}] ==="
+  echo "=== $(date -Is) starting [${COLUMN} / ${COUNTRY}] ==="
 
   tunnel_up || return 1
   rm -f "$BLOCKED_MARKER"
@@ -109,7 +124,7 @@ run() {
   # persists is still reported rather than hidden.
   if [ -f "$BLOCKED_MARKER" ]; then
     rm -f "$BLOCKED_MARKER"
-    echo "$(date -Is) [${REGION}] whole run blocked at Cloudflare — retrying once through a fresh VPN exit"
+    echo "$(date -Is) [${COLUMN}] whole run blocked at Cloudflare — retrying once through a fresh VPN exit"
     if ! tunnel_up; then
       # No stamp: the region stays due and tries again on the next 5-minute
       # tick rather than waiting a full interval with nothing recorded.
@@ -126,7 +141,7 @@ run() {
   # Stamp AFTER completion — this is what makes the interval measure from the
   # end of a run rather than its start.
   date +%s > "$STAMP"
-  echo "=== $(date -Is) finished [${REGION}] rc=${rc} ==="
+  echo "=== $(date -Is) finished [${COLUMN}] rc=${rc} ==="
   return $rc
 }
 
@@ -145,7 +160,7 @@ fi
 
 exec 9>"$LOCK_FILE"
 if ! flock -n 9; then
-  echo "$(date -Is) [${REGION}] another region is running — will retry next tick"
+  echo "$(date -Is) [${COLUMN}] another region is running — will retry next tick"
   exit 0
 fi
 

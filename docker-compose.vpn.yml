@@ -50,6 +50,6 @@ services:
       INGEST_URL: https://employee.netovation.eu/automated-qa-system/api/results
       # Which market this run represents — tags every result row.
       CHECK_REGION: ${CHECK_REGION:-FR}
-      # X7 stays off until its Cloudflare challenge is lifted; its checks are
-      # skipped rather than posted as permanent failures.
-      X7_ENABLED: ${X7_ENABLED:-false}
+      # Which site in that market (blank = the region's default site). Set
+      # per-run by scripts/run-checks.sh; "x7" selects x7casino2.com.
+      CHECK_SITE: ${CHECK_SITE:-}

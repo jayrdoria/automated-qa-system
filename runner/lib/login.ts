@@ -41,4 +41,5 @@ export async function loginAndVerify(page: Page, brand: BrandConfig): Promise<vo
     brand.loginTrigger(page),
     `${brand.label}: still showing the login control after sign-in — session not established`,
   ).toHaveCount(0, { timeout: 30_000 });
+  if (brand.sessionReady) await brand.sessionReady(page);
 }

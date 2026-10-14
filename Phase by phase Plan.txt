@@ -147,3 +147,19 @@ their running containers or volumes. Exact diffs: apache/automated-qa-system.con
 - Watch the Slack channel for a few days to tune out false positives (flaky selectors,
   slow loads) before treating alerts as real incidents
 - Multi-region (DE/FR/IT/ES) stays as a documented future phase, not built now
+
+---
+
+**Rev 4 — X7 Casino on x7casino2.com (2026-10-14)**
+- Columns: X7 · FR, X7 · DE, X7 · IT (same ProtonVPN exits as Stakes). No ES (geo-blocked),
+  no EN/BD column. Each is its own cron run: `run-checks.sh FR x7`.
+- A region can now carry two columns; a column is identified by brand + region. Existing
+  `run-checks.sh FR` lines resolve to exactly the same Stakes site and game rotation as before.
+- Interval 20 → 25 min (8 columns behind one lock; measured Stakes runs avg ~2 min each).
+- X7 language is pinned by URL (/fr, /de, /it), not by IP.
+- Selectors measured on the live DOM; login scoped to #login-modal (home page has a sign-up
+  form with the same field names). Games: Wanted Dead or a Wild, Gates of Olympus 2500,
+  Bavarian Riches 3, verified by the wrapper frame's game_name parameter.
+- Known site behaviour: X7's launch API intermittently returns 403 gameplay_blocked for the
+  test account; reported as "The site refused to start the game".
+- Dashboard: separate X7 Casino table under the Stakes table.

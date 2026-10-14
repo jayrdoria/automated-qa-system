@@ -2,9 +2,9 @@ import { test, expect } from "@playwright/test";
 import { BRAND_IDS, activeBrands, getBrand } from "../../lib/brands";
 import { loginAndVerify } from "../../lib/login";
 
-// Exactly ONE domain runs per region: activeBrands() resolves CHECK_REGION to
-// its mirror (FR/IT -> stakes3, DE/ES -> stakes, BD -> stakescasino) and the
-// rest skip. The describe-block title stays equal to the brand id, which is
+// Exactly ONE domain runs per invocation: activeBrands() resolves CHECK_REGION
+// (+ CHECK_SITE) to its column (FR/IT -> stakes3, DE/ES -> stakes,
+// BD -> stakescasino, FR/DE/IT + x7 -> x7casino2.com) and the rest skip. The describe-block title stays equal to the brand id, which is
 // what the reporter files results under.
 for (const id of BRAND_IDS) {
   const enabled = () => activeBrands().includes(id);
@@ -63,6 +63,18 @@ for (const id of BRAND_IDS) {
           ? `${brand.label}: cashier modal did not open (the Deposit click also failed: ${clickFailure})`
           : `${brand.label}: cashier modal did not open`,
       ).toBeVisible({ timeout: 30_000 });
+
+      // Open is not the same as usable: a cashier whose payment methods failed
+      // to load renders the modal shell and nothing in it.
+      if (brand.cashierContent) {
+        const content = brand.cashierContent(page);
+        await expect
+          .poll(() => content.count(), {
+            message: `${brand.label}: cashier opened but listed no payment methods`,
+            timeout: 30_000,
+          })
+          .toBeGreaterThan(0);
+      }
     });
   });
 }

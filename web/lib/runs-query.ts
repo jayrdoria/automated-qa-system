@@ -49,7 +49,8 @@ const day = z
   .regex(/^\d{4}-\d{2}-\d{2}$/, "dates must be YYYY-MM-DD")
   .refine(isRealDay, "not a real date");
 
-const REGION_IDS = COLUMNS.map((c) => c.region) as [string, ...string[]];
+// Unique: FR, DE and IT each carry two columns (Stakes + X7).
+const REGION_IDS = [...new Set(COLUMNS.map((c) => c.region))] as [string, ...string[]];
 const CHECK_IDS = CHECKS.map((c) => c.id) as [string, ...string[]];
 
 export const runsFilterSchema = z

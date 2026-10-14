@@ -4,8 +4,8 @@
  * stakes3 and stakescasino are one product behind three hostnames, and the
  * dashboard reports them separately because a mirror can break on its own.
  *
- * x7 is a genuinely different operator and stays deferred behind its Cloudflare
- * challenge.
+ * x7 is a genuinely different operator (x7casino2.com) with its own table on
+ * the dashboard.
  */
 export const BRANDS = ["stakes", "stakes3", "stakescasino", "x7"] as const;
 export type Brand = (typeof BRANDS)[number];
@@ -23,7 +23,7 @@ export const SITE_DOMAINS: Record<Brand, string> = {
   stakes: "stakes.com",
   stakes3: "stakes3.com",
   stakescasino: "stakescasino.com",
-  x7: "x7casino.com",
+  x7: "x7casino2.com",
 };
 
 /// Phase 2's check list. The dashboard renders a tile per brand/check pair
@@ -58,6 +58,9 @@ export const GAMES = [
   { id: "wanted-dead-or-a-wild", name: "Wanted Dead or a Wild" },
   { id: "multifly", name: "Multifly" },
   { id: "ze-zeus", name: "Ze Zeus" },
+  // X7_GAMES (runner/lib/games.ts). Wanted Dead or a Wild is shared above.
+  { id: "gates-of-olympus-2500", name: "Gates of Olympus 2500" },
+  { id: "bavarian-riches-3", name: "Bavarian Riches 3" },
 ] as const;
 
 export function gameName(id: string | null | undefined): string | null {
@@ -75,8 +78,9 @@ export const CANARY_CHECK = "site-up";
 /**
  * One column of the dashboard = one cron run = one (market, domain) pair.
  *
- * Each market is served by exactly ONE domain, so the pairing is fixed here and
- * both the runner and the dashboard read it from this table. A market is a
+ * A market can carry more than one column (FR -> stakes3 AND x7), so a column
+ * is identified by brand + region, never by region alone. The pairing is fixed
+ * here and mirrored in runner/lib/brands.ts. A market is a
  * separate run through a VPN exit node in that country: the sites localise and
  * gate by IP, so "passing in FR" says nothing about DE.
  *
@@ -87,6 +91,9 @@ export const CANARY_CHECK = "site-up";
  * cronOffset is the minute-past-each-5-minute-tick at which this column is
  * eligible to start, and MUST match scripts/install-cron.sh:
  *   FR 0,5,10,...  DE 1,6,11,...  IT 2,7,12,...  ES 3,8,13,...  BD 4,9,14,...
+ *   X7: FR 2,7,...  DE 3,8,...  IT 4,9,...
+ * Two columns sharing a minute is fine: the global run lock lets one start and
+ * the other takes the next tick.
  *
  * The UI computes "next run" from these. If they drift from the crontab the
  * countdown silently lies — it will look plausible and be wrong by minutes.
@@ -97,6 +104,10 @@ export const COLUMNS = [
   { region: "IT", label: "Italy", site: "stakes3", cronOffset: 2 },
   { region: "ES", label: "Spain", site: "stakes", cronOffset: 3 },
   { region: "BD", label: "Bangladesh", site: "stakescasino", cronOffset: 4 },
+  // Appended after the Stakes columns — order mirrors runner/lib/brands.ts.
+  { region: "FR", label: "France", site: "x7", cronOffset: 2 },
+  { region: "DE", label: "Germany", site: "x7", cronOffset: 3 },
+  { region: "IT", label: "Italy", site: "x7", cronOffset: 4 },
 ] as const satisfies readonly {
   region: string;
   label: string;
@@ -106,16 +117,27 @@ export const COLUMNS = [
 
 export type RegionId = (typeof COLUMNS)[number]["region"];
 
-/**
- * Which domain a given market is tested against.
- *
- * Returns undefined for an unknown region rather than defaulting to a site:
- * a typo'd CHECK_REGION silently testing the wrong domain and filing the
- * results under it is far worse than a loud failure.
- */
-export function siteForRegion(region: string): Brand | undefined {
-  return COLUMNS.find((c) => c.region === region)?.site;
+export type Column = (typeof COLUMNS)[number];
+
+/** Stable identity of a column. Region alone is ambiguous (FR has two). */
+export function columnKey(c: { site: string; region: string }): string {
+  return `${c.site}:${c.region}`;
 }
+
+/// Unique regions, for filters — FR appears in two columns.
+export const REGIONS = [...new Map(COLUMNS.map((c) => [c.region, c])).values()].map((c) => ({
+  region: c.region,
+  label: c.label,
+}));
+
+/**
+ * The dashboard's tables. Stakes mirrors share one matrix (a market is served
+ * by one mirror); X7 is a different operator and gets its own.
+ */
+export const COLUMN_GROUPS: { id: string; title: string; columns: readonly Column[] }[] = [
+  { id: "stakes", title: "Stakes", columns: COLUMNS.filter((c) => c.site !== "x7") },
+  { id: "x7", title: "X7 Casino", columns: COLUMNS.filter((c) => c.site === "x7") },
+];
 
 /**
  * Must match scripts/install-cron.sh. Columns are staggered a minute apart so
@@ -130,7 +152,7 @@ export function siteForRegion(region: string): Brand | undefined {
  * Change one and you must change the other, or the countdown and the scheduler
  * disagree and the UI reports regions as overdue while they are running on time.
  */
-export const RUN_INTERVAL_MIN = 20;
+export const RUN_INTERVAL_MIN = 25;
 
 /**
  * How often cron *offers* a column a chance to run. The column only actually
@@ -150,10 +172,8 @@ export const RUN_GRACE_MIN = 6;
  * Lives here rather than in the dashboard because it is a function of
  * RUN_INTERVAL_MIN: every column serialises behind one global lock, so a column
  * that loses the lock for two or three ticks can legitimately go ~40 minutes
- * between runs. The previous 45-minute value was tuned for four columns and
- * would flag a healthy fifth column as stale.
+ * between runs. Eight columns at a 25-minute interval keep the lock busy
+ * ~16 min per cycle, so ~3x the interval leaves room for a column that loses
+ * the lock several ticks in a row without crying wolf.
  */
-export const STALE_AFTER_MIN = 60;
-
-/// X7 is deferred behind its Cloudflare challenge; shown as such, not as failing.
-export const DEFERRED_BRANDS: string[] = ["x7"];
+export const STALE_AFTER_MIN = 75;

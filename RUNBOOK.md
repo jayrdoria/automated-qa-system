@@ -42,7 +42,7 @@ Brand logins are stored as **repository secrets** and written into the server
 | `STAKES3_USERNAME` / `STAKES3_PASSWORD` | stakes3.com (FR, IT) | **Yes — required** |
 | `STAKESCASINO_USERNAME` / `STAKESCASINO_PASSWORD` | stakescasino.com (BD) | **Yes — required** |
 | `STAKES_USERNAME` / `STAKES_PASSWORD` | stakes.com (DE, ES) | Optional — only to rotate |
-| `X7_USERNAME` / `X7_PASSWORD` | x7casino.com | Optional — dormant, x7 has no column |
+| `X7_USERNAME` / `X7_PASSWORD` | x7casino2.com (FR, DE, IT) | Optional — only to rotate |
 
 The last four are **listed but not required**. Because an unset secret is
 skipped, leaving them empty means the deploy touches nothing and the values
@@ -118,18 +118,47 @@ for a deliberate test — mark such sends `[TEST]`.
 
 ## Game rotation
 
-game-load tests one game per run — Wanted Dead or a Wild, Multifly, Ze Zeus —
-each on the column's own domain. Every column covers all three every hour, and
-columns test different games at the same moment. The check proves the RIGHT
-game loaded via the provider's game id in the frame URL.
+game-load tests one game per run, each on the column's own domain:
 
-To add a game: add it to `STAKES_GAMES` in `runner/lib/games.ts` **and** `GAMES`
-in `web/lib/checks.ts`, with its `providerGameId` read from the frame URL
-(`…?gameid=NNNN`). Pin one for debugging:
+- Stakes: Wanted Dead or a Wild, Multifly, Ze Zeus — proven by the provider's
+  game id in the frame URL (`…?gameid=NNNN`).
+- X7: Wanted Dead or a Wild, Gates of Olympus 2500, Bavarian Riches 3 — proven
+  by the `game_name=` parameter of X7's game-wrapper frame.
+
+Every column covers its three games every 75 minutes (25-minute interval), and
+columns test different games at the same moment.
+
+To add a game: add it to `STAKES_GAMES` / `X7_GAMES` in `runner/lib/games.ts`
+**and** `GAMES` in `web/lib/checks.ts`. Pin one for debugging:
 
 ```bash
 GAME_OVERRIDE=multifly CHECK_REGION=BD npx playwright test tests/checks/3-game-load.spec.ts
+GAME_OVERRIDE=gates-of-olympus-2500 CHECK_REGION=FR CHECK_SITE=x7 npx playwright test tests/checks/3-game-load.spec.ts
 ```
+
+## X7 Casino (x7casino2.com)
+
+Three columns — **FR, DE, IT** — sharing those exits with Stakes. No ES (geo-
+blocked) and no EN/BD column. Each column is its own cron run:
+
+```bash
+./scripts/run-checks.sh FR x7      # SITE omitted = the region's Stakes site, as before
+```
+
+- **Language comes from the URL, not the IP.** Each column pins `/fr`, `/de` or
+  `/it`, so the UI language is deterministic.
+- **The home page has a sign-up form** using the same field name and form class
+  as the login modal. Every login selector is scoped to `#login-modal`; never
+  loosen that, or the check types credentials into registration.
+- **`gameplay_blocked`** — X7's launch API (`/player/game/<id>`) intermittently
+  answers 403 `gameplay_blocked` for the test account, on any game, while the
+  session is valid. Measured during setup after ~30 launches in an hour; the
+  alert says "The site refused to start the game (…)". If it persists at the
+  normal cadence (~1 launch per 8 min across the three columns), ask the
+  operator to check the test account.
+- `X7_BASE_URL` is the ORIGIN only (`https://x7casino2.com`); the language
+  prefix is added per column. Not synced by deploy, with one exception: the
+  deploy rewrites it once if it still holds the old `x7casino.com` host.
 
 ## Export
 
@@ -177,8 +206,8 @@ is red the site is down and every other red is noise; if it is green, a red
 below it is a genuinely broken feature.
 
 
-Selectors for Stakes came from the login screenshot. **X7's are unverified** —
-its login is a modal and nobody has seen its DOM.
+Selectors for Stakes came from the login screenshot. X7's were measured on the
+live x7casino2.com DOM (see the X7 section above).
 
 Once Gate 0 passes:
 
@@ -191,8 +220,7 @@ Fix failures by editing **`runner/lib/brands.ts` only**. Every brand-specific
 string lives there; specs stay generic. If you find yourself editing a `.spec.ts`
 to fix a selector, the abstraction has leaked — push it back into `brands.ts`.
 
-Expect X7 to need work. Prefer, in order: `getByTestId` → `getByRole` →
-placeholder/text → CSS classes.
+Prefer, in order: `getByTestId` → `getByRole` → placeholder/text → CSS classes.
 
 - [ ] All 14 checks pass twice consecutively
 - [ ] `login-rejects-bad-creds` genuinely fails to log in (not just a slow pass)
@@ -220,16 +248,23 @@ Force a failure — temporarily point `STAKES_BASE_URL` at a bad path, run, reve
 
 ## Gate 3 — Scheduling
 
+**Every deploy installs the schedule automatically** (after both deploy gates
+pass) — no SSH needed. Edit the schedule in `scripts/install-cron.sh` and push.
+The installer touches only its own marked block, verifies every other crontab
+job is unchanged (restoring `logs/crontab.bak` if not), and aborts without
+writing on an unreadable crontab or unbalanced markers.
+
+Manual use, if ever needed:
+
 ```bash
-./scripts/install-cron.sh --show    # review first
-./scripts/install-cron.sh           # idempotent; leaves other crontab lines alone
-crontab -l
+./scripts/install-cron.sh --show    # print what would be installed
+./scripts/install-cron.sh           # install; prints the resulting crontab
 ```
 
-- [ ] Checks appear on the dashboard within 20 minutes unprompted
+- [ ] Checks appear on the dashboard within 25 minutes unprompted
 - [ ] `logs/cron.log` shows clean runs
 - [ ] Occasional `flock` exit 1 is fine — it means the guard stopped an overlap.
-      Frequent means runs exceed the 20-minute interval; lengthen it.
+      Frequent means runs exceed the 25-minute interval; lengthen it.
 
 ---
 

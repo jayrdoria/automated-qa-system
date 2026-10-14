@@ -154,6 +154,18 @@ const RULES: Rule[] = [
     }),
   },
   {
+    // Above "never appeared": the launch API said why, so say that instead.
+    test: /game launch refused by the site \(([^)]+)\)/,
+    explain: (m) => ({
+      headline: `The site refused to start the game (${m[1]})`,
+      detail:
+        "Login worked and the game page opened, but the casino's game server declined to launch " +
+        "the game for the test account. Usually a temporary restriction on that account; if it " +
+        "persists across runs, ask the operator to check the test account.",
+      verdict: "site",
+    }),
+  },
+  {
     test: /game iframe never appeared/,
     explain: () => ({
       headline: "The game did not load",
@@ -246,7 +258,7 @@ const RULES: Rule[] = [
   {
     // Waiting for the header login trigger. The regex source is embedded in the
     // error text, which is what makes this identifiable.
-    test: /waitFor: Timeout (\d+)ms[\s\S]*?\(connexion\|/,
+    test: /waitFor: Timeout (\d+)ms[\s\S]*?(?:\(connexion\||connexion\|anmeldung)/,
     explain: (m) => ({
       headline: "The Login button never appeared",
       detail:
@@ -256,7 +268,7 @@ const RULES: Rule[] = [
     }),
   },
   {
-    test: /waitFor: Timeout (\d+)ms[\s\S]*?\(providers\|/,
+    test: /waitFor: Timeout (\d+)ms[\s\S]*?(?:\(providers\||\.providers-menu-btn)/,
     explain: (m) => ({
       headline: "The Providers button never appeared",
       detail: `The casino page loaded but its Providers button did not show within ${seconds(m[1])}.`,
@@ -264,7 +276,7 @@ const RULES: Rule[] = [
     }),
   },
   {
-    test: /waitFor: Timeout (\d+)ms[\s\S]*?getByPlaceholder/,
+    test: /waitFor: Timeout (\d+)ms[\s\S]*?(?:getByPlaceholder|email_username_input)/,
     explain: (m) => ({
       headline: "The login form did not open",
       detail: `The Login button was clicked but the form did not appear within ${seconds(m[1])}.`,

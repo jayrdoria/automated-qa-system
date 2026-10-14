@@ -44,9 +44,15 @@ const schema = z.object({
   STAKESCASINO_USERNAME: z.string().default(""),
   STAKESCASINO_PASSWORD: z.string().default(""),
 
-  // Optional while X7 is deferred — the checks are skipped, so demanding
-  // credentials would block the whole suite on an unusable brand.
-  X7_BASE_URL: z.string().url().default("https://x7casino.com"),
+  // x7casino2.com is the mirror that is reachable from the FR/DE/IT exits; the
+  // original x7casino.com host is not tested. Origin only — the language
+  // prefix (/fr, /de, /it) is added per column in brands.ts.
+  // Credentials: optional here, required at the point of use (same reason as
+  // the Stakes mirrors above).
+  X7_BASE_URL: z.preprocess(
+    blankToUndefined,
+    z.string().url().default("https://x7casino2.com"),
+  ),
   X7_USERNAME: z.string().default(""),
   X7_PASSWORD: z.string().default(""),
 
@@ -68,14 +74,12 @@ const schema = z.object({
     .default("FR"),
 
   /**
-   * Reserved. X7 has no column in COLUMNS, so it cannot be selected by any
-   * region and this flag currently gates nothing. Kept so its credentials and
-   * selectors stay wired up for the day its Cloudflare challenge is lifted.
+   * Which domain this run tests, when a region has more than one column
+   * (FR -> stakes3 AND x7). Blank means the region's FIRST column in COLUMNS,
+   * which is what every pre-X7 cron line relies on: `run-checks.sh FR` still
+   * tests stakes3.com, unchanged.
    */
-  X7_ENABLED: z
-    .enum(["true", "false"])
-    .default("false")
-    .transform((v) => v === "true"),
+  CHECK_SITE: z.preprocess(blankToUndefined, z.string().optional()),
 });
 
 export type RunnerConfig = z.infer<typeof schema>;

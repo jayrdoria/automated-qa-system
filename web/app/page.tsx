@@ -1,12 +1,13 @@
 import { prisma } from "@/lib/prisma";
 import {
   BRANDS,
-  BRAND_LABELS,
   SITE_DOMAINS,
   CHECKS,
   CHECK_LABELS,
   COLUMNS,
-  DEFERRED_BRANDS,
+  COLUMN_GROUPS,
+  REGIONS,
+  columnKey,
   RUN_INTERVAL_MIN,
   RUN_GRACE_MIN,
   STALE_AFTER_MIN,
@@ -29,7 +30,7 @@ import { RunStatus } from "./RunStatus";
 import { AutoRefresh } from "./AutoRefresh";
 import { RunningCell } from "./RunningCell";
 
-// Cron writes new rows every 20 min — never cache this.
+// Cron writes new rows every RUN_INTERVAL_MIN — never cache this.
 export const dynamic = "force-dynamic";
 
 /// Defined in lib/checks.ts because it is a function of RUN_INTERVAL_MIN and
@@ -221,7 +222,7 @@ function RunsFilterForm({ filter }: { filter: RunsFilter }) {
         Domain
         <select name="domain" defaultValue={filter.domain ?? ""} className={inputCls}>
           <option value="">All</option>
-          {BRANDS.filter((b) => !DEFERRED_BRANDS.includes(b)).map((b) => (
+          {BRANDS.map((b) => (
             <option key={b} value={b}>
               {SITE_DOMAINS[b]}
             </option>
@@ -232,7 +233,7 @@ function RunsFilterForm({ filter }: { filter: RunsFilter }) {
         Region
         <select name="region" defaultValue={filter.region ?? ""} className={inputCls}>
           <option value="">All</option>
-          {COLUMNS.map((c) => (
+          {REGIONS.map((c) => (
             <option key={c.region} value={c.region}>
               {c.region} · {c.label}
             </option>
@@ -344,12 +345,13 @@ export default async function DashboardPage({
 
   const medianByCheck = new Map(medianRows.map((m) => [m.check_name, Number(m.median_ms)]));
 
-  // Completion times for every region, live or not — the countdown measures
-  // from the end of the last run, matching scripts/run-checks.sh.
-  const lastFinishedByRegion = new Map(
+  // Completion times for every column, live or not — the countdown measures
+  // from the end of the last run, matching scripts/run-checks.sh. Keyed by
+  // column (brand:region): FR carries two columns that run independently.
+  const lastFinishedByColumn = new Map(
     progressRows
       .filter((p) => p.finishedAt !== null)
-      .map((p) => [p.region, p.finishedAt!.toISOString()]),
+      .map((p) => [columnKey({ site: p.brand, region: p.region }), p.finishedAt!.toISOString()]),
   );
 
   // All latest rows for a cell. Several for game-load (one per game).
@@ -409,7 +411,7 @@ export default async function DashboardPage({
       (rowsByKey.get(`${brand}:${region}:${c.id}`) ?? []).some((r) => r.startedAt >= since),
     );
 
-  const progressByRegion = new Map(
+  const progressByColumn = new Map(
     progressRows
       .filter(
         (p) =>
@@ -418,7 +420,7 @@ export default async function DashboardPage({
           !fullResultsSince(p.brand, p.region, p.startedAt),
       )
       .map((p) => [
-        p.region,
+        columnKey({ site: p.brand, region: p.region }),
         {
           completed: p.completed,
           total: p.total,
@@ -432,14 +434,15 @@ export default async function DashboardPage({
 
   const totalPages = Math.max(1, Math.ceil(totalRuns / PAGE_SIZE));
 
-  // Most recent result per region — feeds the live schedule indicator so it can
+  // Most recent result per column — feeds the live schedule indicator so it can
   // tell "a tick passed and nothing arrived" (running, or late) from "we have
   // fresh data" (idle, counting down).
-  const lastRunByRegion = new Map<string, string>();
+  const lastRunByColumn = new Map<string, string>();
   for (const r of latestRuns) {
-    const prev = lastRunByRegion.get(r.region);
+    const k = columnKey({ site: r.brand, region: r.region });
+    const prev = lastRunByColumn.get(k);
     if (!prev || new Date(prev) < r.started_at) {
-      lastRunByRegion.set(r.region, r.started_at.toISOString());
+      lastRunByColumn.set(k, r.started_at.toISOString());
     }
   }
 
@@ -460,7 +463,7 @@ export default async function DashboardPage({
   const incidents = shownColumns.flatMap((col) => {
     // A column mid-run has no current verdict — excluded so the panel doesn't
     // flash last cycle's errors while they are being retested.
-    if (progressByRegion.has(col.region)) return [];
+    if (progressByColumn.has(columnKey(col))) return [];
     const items = CHECKS.map((c) => {
       const { row } = cellRow(`${col.site}:${col.region}:${c.id}`);
       return { checkName: c.id, failed: statusOf(row) === "fail", row };
@@ -483,19 +486,19 @@ export default async function DashboardPage({
   });
 
   const blockedCells = shownColumns
-    .filter((col) => !progressByRegion.has(col.region))
+    .filter((col) => !progressByColumn.has(columnKey(col)))
     .flatMap((col) => CHECKS.map((c) => statusOf(cellRow(`${col.site}:${col.region}:${c.id}`).row)))
     .filter((s) => s === "blocked").length;
 
   return (
     <main className="mx-auto max-w-6xl px-6 py-10">
-      <AutoRefresh live={progressByRegion.size > 0} />
+      <AutoRefresh live={progressByColumn.size > 0} />
       <header className="mb-8 flex flex-wrap items-baseline justify-between gap-4">
         <div>
           <h1 className="text-2xl font-semibold tracking-tight">Automated QA Monitor</h1>
           <p className="mt-1 text-sm text-neutral-500 dark:text-neutral-400">
-            {shownColumns.map((c) => c.region).join(" · ")} · each column checked every{" "}
-            {RUN_INTERVAL_MIN} minutes
+            {COLUMN_GROUPS.map((g) => `${g.title}: ${g.columns.map((c) => c.region).join(" · ")}`).join("  |  ")}{" "}
+            · each column checked every {RUN_INTERVAL_MIN} minutes
           </p>
         </div>
         <div className="flex flex-wrap items-center gap-2">
@@ -559,18 +562,22 @@ export default async function DashboardPage({
         </section>
       )}
 
-      <section className="mb-10">
-        {/* One matrix for everything. Each column is a (market, domain) pair,
-            because a market is served by exactly one mirror — so the domain
-            belongs in the header, not in a separate table per brand. */}
+      {/* One matrix per operator. Each column is a (market, domain) pair; the
+          Stakes mirrors share a table because a market is served by exactly
+          one mirror, while X7 is a different operator with its own table. */}
+      {COLUMN_GROUPS.map((group) => (
+      <section key={group.id} className="mb-10">
+        <h2 className="mb-3 text-sm font-semibold uppercase tracking-wide text-neutral-500 dark:text-neutral-400">
+          {group.title}
+        </h2>
         <div className="overflow-x-auto rounded-lg border border-neutral-200 dark:border-neutral-800">
           <table className="w-full border-collapse text-sm">
             <thead>
               <tr className="bg-neutral-50 dark:bg-neutral-900">
                 <th className="px-4 py-2 text-left font-medium">Check</th>
-                {shownColumns.map((col) => (
+                {group.columns.map((col) => (
                   <th
-                    key={col.region}
+                    key={columnKey(col)}
                     className="px-3 py-2 text-center font-medium"
                     title={`${col.label} · ${SITE_DOMAINS[col.site]}`}
                   >
@@ -581,13 +588,13 @@ export default async function DashboardPage({
                         {SITE_DOMAINS[col.site]}
                       </span>
                       {(() => {
-                        const live = progressByRegion.get(col.region);
+                        const live = progressByColumn.get(columnKey(col));
                         if (!live) {
                           return (
                             <RunStatus
                               cronOffset={col.cronOffset}
-                              lastFinishedIso={lastFinishedByRegion.get(col.region) ?? null}
-                              lastRunIso={lastRunByRegion.get(col.region) ?? null}
+                              lastFinishedIso={lastFinishedByColumn.get(columnKey(col)) ?? null}
+                              lastRunIso={lastRunByColumn.get(columnKey(col)) ?? null}
                             />
                           );
                         }
@@ -615,9 +622,9 @@ export default async function DashboardPage({
               {CHECKS.map((check) => (
                 <tr key={check.id} className="border-t border-neutral-200 dark:border-neutral-800">
                   <td className="px-4 py-2 font-medium">{check.label}</td>
-                  {shownColumns.map((col) => {
+                  {group.columns.map((col) => {
                     const { row: last, games } = cellRow(`${col.site}:${col.region}:${check.id}`);
-                    const live = progressByRegion.get(col.region);
+                    const live = progressByColumn.get(columnKey(col));
                     /*
                      * Row lifecycle during a live run, resolved in order:
                      *   1. this check is executing        -> running
@@ -663,7 +670,7 @@ export default async function DashboardPage({
                       : STATUS_LABELS[status];
 
                     return (
-                      <td key={col.region} className="px-3 py-2 text-center">
+                      <td key={columnKey(col)} className="px-3 py-2 text-center">
                         <span
                           title={tooltip}
                           className={`inline-flex min-w-[64px] items-center justify-center rounded px-2 py-1 text-xs font-medium ${CELL_STYLES[status]}`}
@@ -686,23 +693,6 @@ export default async function DashboardPage({
           </table>
         </div>
       </section>
-
-      {/* X7 has no column — it is a different operator, still behind a
-          Cloudflare interactive challenge that a VPN cannot clear. Shown as
-          deferred rather than omitted, so "not monitored" never reads as
-          "monitored and healthy". */}
-      {DEFERRED_BRANDS.map((brand) => (
-        <section key={brand} className="mb-10">
-          <h2 className="mb-3 flex items-center gap-2 text-sm font-semibold uppercase tracking-wide text-neutral-500 dark:text-neutral-400">
-            {BRAND_LABELS[brand as Brand] ?? brand}
-            <span className="rounded bg-neutral-200 px-2 py-0.5 text-[11px] font-medium normal-case tracking-normal text-neutral-600 dark:bg-neutral-800 dark:text-neutral-400">
-              deferred — Cloudflare challenge
-            </span>
-          </h2>
-          <div className="rounded-lg border border-dashed border-neutral-300 p-4 text-sm text-neutral-500 dark:border-neutral-700">
-            Not monitored. No market routes to this brand, so it has no column in the grid above.
-          </div>
-        </section>
       ))}
 
       <section>

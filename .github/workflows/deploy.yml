@@ -108,8 +108,8 @@ jobs:
           STAKES3_PASSWORD: ${{ secrets.STAKES3_PASSWORD }}
           STAKESCASINO_USERNAME: ${{ secrets.STAKESCASINO_USERNAME }}
           STAKESCASINO_PASSWORD: ${{ secrets.STAKESCASINO_PASSWORD }}
-          # Dormant: x7 has no entry in COLUMNS so it never runs. Wired up now
-          # so enabling it later is a secret plus a push, not an SSH session.
+          # x7casino2.com (FR/DE/IT columns). Like the others, an unset secret
+          # leaves the server value untouched.
           X7_USERNAME: ${{ secrets.X7_USERNAME }}
           X7_PASSWORD: ${{ secrets.X7_PASSWORD }}
         with:
@@ -203,6 +203,22 @@ jobs:
             sync_cred X7_USERNAME           "${X7_USERNAME:-}"
             sync_cred X7_PASSWORD           "${X7_PASSWORD:-}"
 
+            # ── One-time host move: x7casino.com -> x7casino2.com ───────────
+            #
+            # X7 is tested on x7casino2.com. Base URLs are deliberately NOT
+            # synced (see above), so this is a narrow migration, not a sync:
+            # it rewrites X7_BASE_URL ONLY when it still holds the old host,
+            # exactly. Any other value — blank (the runner defaults to
+            # x7casino2.com), already migrated, or a host someone chose on
+            # purpose — is left alone. Idempotent: a no-op on every later
+            # deploy. Covered by the .env.predeploy backup taken above.
+            if grep -qE '^X7_BASE_URL=https?://(www\.)?x7casino\.com/?$' .env; then
+              bash scripts/set-env.sh X7_BASE_URL https://x7casino2.com > /dev/null
+              echo "  X7_BASE_URL: moved from x7casino.com to x7casino2.com"
+            else
+              echo "  X7_BASE_URL: no migration needed — left untouched"
+            fi
+
             docker pull ghcr.io/jayrdoria/automated-qa-system-web:latest
             docker pull ghcr.io/jayrdoria/automated-qa-system-web:migrate
             docker pull ghcr.io/jayrdoria/automated-qa-system-runner:latest
@@ -238,6 +254,17 @@ jobs:
             # Second gate: the runner image boots and Chromium launches.
             docker compose -f docker-compose.prod.yml --profile batch run --rm runner \
               npx playwright test tests/smoke.spec.ts
+
+            # ── Schedule: install the check crontab from the repo ──────────
+            #
+            # After both gates, so a failed deploy never changes what runs.
+            # install-cron.sh rewrites ONLY its own marked block and verifies
+            # every other job (MailCraft, backups, ...) is unchanged, restoring
+            # its backup if not. It aborts without writing on an unreadable
+            # crontab or unbalanced markers — which fails this deploy loudly
+            # rather than guessing. Idempotent: identical crontab on re-run.
+            # --quiet keeps other apps' jobs out of the CI log.
+            bash scripts/install-cron.sh --quiet
 
             docker image prune -f
 
