@@ -42,7 +42,9 @@ Brand logins are stored as **repository secrets** and written into the server
 | `STAKES3_USERNAME` / `STAKES3_PASSWORD` | stakes3.com (FR, IT) | **Yes — required** |
 | `STAKESCASINO_USERNAME` / `STAKESCASINO_PASSWORD` | stakescasino.com (BD) | **Yes — required** |
 | `STAKES_USERNAME` / `STAKES_PASSWORD` | stakes.com (DE, ES) | Optional — only to rotate |
-| `X7_USERNAME` / `X7_PASSWORD` | x7casino2.com (FR, DE, IT) | Optional — only to rotate |
+| `X7_USERNAME` / `X7_PASSWORD` | x7casino2.com (FR) | Optional — only to rotate |
+| `X7_DE_USERNAME` / `X7_DE_PASSWORD` | x7casino2.com (DE) | Yes — until set, DE uses the FR account |
+| `X7_IT_USERNAME` / `X7_IT_PASSWORD` | x7casino2.com (IT) | Yes — until set, IT uses the FR account |
 
 The last four are **listed but not required**. Because an unset secret is
 skipped, leaving them empty means the deploy touches nothing and the values
@@ -150,12 +152,14 @@ blocked) and no EN/BD column. Each column is its own cron run:
 - **The home page has a sign-up form** using the same field name and form class
   as the login modal. Every login selector is scoped to `#login-modal`; never
   loosen that, or the check types credentials into registration.
-- **`gameplay_blocked`** — X7's launch API (`/player/game/<id>`) intermittently
-  answers 403 `gameplay_blocked` for the test account, on any game, while the
-  session is valid. Measured during setup after ~30 launches in an hour; the
-  alert says "The site refused to start the game (…)". If it persists at the
-  normal cadence (~1 launch per 8 min across the three columns), ask the
-  operator to check the test account.
+- **`gameplay_blocked`** — X7's launch API (`/player/game/<id>`) refuses
+  roughly half of all launches with 403 `gameplay_blocked`, on every account,
+  game and country, while the session is valid; the next launch often works.
+  game-load therefore relaunches a refused game up to 3 times (20s apart) and
+  fails only if every launch is refused — the alert then says "The site refused
+  to start the game (…)". Persistent refusals are worth raising with X7.
+- **One account per column** (`X7_USERNAME` FR, `X7_DE_*`, `X7_IT_*`) so no
+  account is seen logging in from several countries.
 - `X7_BASE_URL` is the ORIGIN only (`https://x7casino2.com`); the language
   prefix is added per column. Not synced by deploy, with one exception: the
   deploy rewrites it once if it still holds the old `x7casino.com` host.

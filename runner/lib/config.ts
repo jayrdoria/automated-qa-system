@@ -55,6 +55,20 @@ const schema = z.object({
   ),
   X7_USERNAME: z.string().default(""),
   X7_PASSWORD: z.string().default(""),
+  /*
+   * Per-column X7 accounts. One account logging in from France, Germany and
+   * Italy within minutes is exactly what X7's risk rules flag: production
+   * launches came back 403 gameplay_blocked from the VPN exits while the same
+   * account launched fine from a single location. Giving each column its own
+   * account keeps every account in one country.
+   *
+   * Optional: blank falls back to X7_USERNAME/X7_PASSWORD (the FR account), so
+   * a deploy that lands before these secrets exist keeps the old behaviour.
+   */
+  X7_DE_USERNAME: z.string().default(""),
+  X7_DE_PASSWORD: z.string().default(""),
+  X7_IT_USERNAME: z.string().default(""),
+  X7_IT_PASSWORD: z.string().default(""),
 
   /// Where the runner POSTs results. Set by compose to the in-network web URL
   /// so results still land if the public vhost is down.

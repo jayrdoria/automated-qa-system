@@ -1,5 +1,5 @@
 import { expect, type Page, type Locator, type Response } from "@playwright/test";
-import { getConfig } from "./config";
+import { getConfig, type RunnerConfig } from "./config";
 import { STAKES_GAMES, X7_GAMES, type GameTarget } from "./games";
 
 /**
@@ -426,8 +426,47 @@ const X7_LOGIN = /^(log\s?in|connexion|anmeldung|anmelden|accedi)$/i;
 /** Buttons in the sidebar's user box while logged OUT ("CREATE ACCOUNT", "LOGIN"). */
 const X7_LOGGED_OUT_BUTTONS = ".sidebar-wrapper:not(.auth) .sidebar-user-section button";
 
+/**
+ * Which X7 account this column logs in with — one per country, so no account
+ * is seen hopping between FR, DE and IT (see X7_DE_* in config.ts).
+ *
+ * FR uses X7_USERNAME. DE/IT use their own keys, falling back to X7_USERNAME
+ * while those are unset — the same site, so the shared account is valid there;
+ * the fallback only costs the isolation, never correctness. Half a pair
+ * (username without password) is a configuration mistake and fails loudly.
+ */
+let warnedX7Fallback = false;
+function x7Account(c: RunnerConfig): { username: string; password: string } {
+  const own =
+    c.CHECK_REGION === "DE"
+      ? { prefix: "X7_DE", username: c.X7_DE_USERNAME, password: c.X7_DE_PASSWORD }
+      : c.CHECK_REGION === "IT"
+        ? { prefix: "X7_IT", username: c.X7_IT_USERNAME, password: c.X7_IT_PASSWORD }
+        : null;
+
+  if (own) {
+    const hasUser = own.username.trim() !== "";
+    const hasPass = own.password.trim() !== "";
+    if (hasUser && hasPass) return { username: own.username, password: own.password };
+    if (hasUser !== hasPass) {
+      throw new Error(
+        `${own.prefix}_USERNAME and ${own.prefix}_PASSWORD must be set together — only one is set.`,
+      );
+    }
+    if (!warnedX7Fallback) {
+      warnedX7Fallback = true;
+      console.warn(`[x7] ${own.prefix}_USERNAME not set — using the shared X7_USERNAME account`);
+    }
+  }
+  return {
+    username: requireCredential(c.X7_USERNAME, "X7_USERNAME", "x7casino2.com"),
+    password: requireCredential(c.X7_PASSWORD, "X7_PASSWORD", "x7casino2.com"),
+  };
+}
+
 function x7(): BrandConfig {
   const c = getConfig();
+  const account = x7Account(c);
   const origin = c.X7_BASE_URL.replace(/\/+$/, "");
   const baseUrl = `${origin}/${X7_LOCALES[c.CHECK_REGION] ?? "en"}`;
   const loginModal = (page: Page) => page.locator("#login-modal");
@@ -440,8 +479,8 @@ function x7(): BrandConfig {
     // a leading "<host>.com: " from errors, and show the host elsewhere.
     label: "X7Casino2.com",
     baseUrl,
-    username: requireCredential(c.X7_USERNAME, "X7_USERNAME", "x7casino2.com"),
-    password: requireCredential(c.X7_PASSWORD, "X7_PASSWORD", "x7casino2.com"),
+    username: account.username,
+    password: account.password,
     casinoPath: "/casino",
     games: X7_GAMES,
     gameUrl: (game) => `${baseUrl}/casino/${game.path}/real`,
@@ -459,11 +498,20 @@ function x7(): BrandConfig {
     openLogin: async (page) => {
       const btn = loginButton(page).first();
       await btn.waitFor({ state: "visible", timeout: 15_000 });
-      const field = loginModal(page).locator('input[name="email_username_input"]');
+      const modal = loginModal(page);
+      // Retry the CLICK only until the modal itself is open. Never re-click an
+      // open modal: the button is then behind its backdrop.
       await expect(async () => {
-        if (!(await field.isVisible())) await btn.click({ timeout: 5_000 });
-        await field.waitFor({ state: "visible", timeout: 3_000 });
+        if (!(await modal.isVisible())) await btn.click({ timeout: 5_000 });
+        await modal.waitFor({ state: "visible", timeout: 3_000 });
       }).toPass({ timeout: 30_000 });
+      // The modal's form renders separately and is slow over the VPN —
+      // measured in production: an open, still-empty modal for several
+      // seconds. Waiting on the form inside the click loop re-clicked through
+      // the backdrop instead of letting it load.
+      await modal
+        .locator('input[name="email_username_input"]')
+        .waitFor({ state: "visible", timeout: 30_000 });
     },
     usernameField: (page) => loginModal(page).locator('input[name="email_username_input"]'),
     passwordField: (page) => loginModal(page).locator('input[name="password_input"]'),

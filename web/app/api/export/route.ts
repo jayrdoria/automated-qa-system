@@ -15,7 +15,7 @@ export const dynamic = "force-dynamic";
  */
 
 const BATCH = 2_000;
-/** Above a full retention window (~62 days × 5 columns × 7 checks × 72 runs). */
+/** Above a full retention window (~62 days × 8 columns × 7 checks × ~58 runs ≈ 200k). */
 const MAX_ROWS = 250_000;
 
 // ── Rate limit ────────────────────────────────────────────────────────────

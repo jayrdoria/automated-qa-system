@@ -684,6 +684,14 @@ export default async function DashboardPage({
                             CELL_LABELS[status]
                           )}
                         </span>
+                        {/* game-load is red while ANY game's latest result is
+                            failing, so a green run of a different game does not
+                            clear it. Naming the game makes that readable. */}
+                        {status === "fail" && last?.target && (
+                          <span className="mt-0.5 block text-[10px] leading-tight text-neutral-500 dark:text-neutral-400">
+                            {gameName(last.target)}
+                          </span>
+                        )}
                       </td>
                     );
                   })}
